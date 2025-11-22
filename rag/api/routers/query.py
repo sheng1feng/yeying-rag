@@ -60,13 +60,18 @@ def query_rag(
             result = pipeline.generate_interview_questions(
                 memory_id=req.memory_id,
                 app=req.app,
-                resume_url=getattr(req, "resume_url", None),
-                jd_id=getattr(req, "jd_id", None),
-                company=getattr(req, "company", None),
-                target_position=getattr(req, "target_position", None),
-                jd_top_k=getattr(req, "jd_top_k", 3),
-                memory_top_k=getattr(req, "memory_top_k", 3),
-                max_chars=getattr(req, "max_chars", 4000),
+                resume_url=req.resume_url,
+                jd_id=req.jd_id,
+                company=req.company,
+                target_position=req.target_position,
+                jd_top_k=req.jd_top_k,
+                memory_top_k=req.memory_top_k,
+                max_chars=req.max_chars,
+
+                # 🆕 透传三个数量参数
+                basic_count=req.basic_count,
+                project_count=req.project_count,
+                scenario_count=req.scenario_count,
             )
             return InterviewQueryResp(
                 app="interviewer",
