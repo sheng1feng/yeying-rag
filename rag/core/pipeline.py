@@ -116,6 +116,9 @@ class RAGPipeline:
             jd_top_k: int = 1,
             memory_top_k: int = 3,
             max_chars: int = 500,
+            basic_count: int = 3,
+            project_count: int = 3,
+            scenario_count: int = 3,
     ):
         """
         面试官场景（改进版）：
@@ -224,29 +227,6 @@ class RAGPipeline:
         }}
     """
 
-        # (2) 项目经验题
-        project_prompt = f"""
-    你是一名资深系统架构面试官，请仔细阅读候选人简历中的项目经历，
-    针对每个项目生成一到两道深入挖掘项目细节的面试题，一共三道题。
-
-    要求：
-    - 每题必须引用项目名称；
-    - 明确考察候选人项目中的设计思路、技术实现、性能优化或系统稳定性；
-    - 优先结合简历中出现的具体技术（如 Flink、Kafka、Redis、WebSocket 等）；
-    - 问题要足够详细、具体；
-    - 严格输出 JSON 格式。
-
-    【候选人项目经历】
-    {base_info}
-    
-    【输出示例】
-        {{
-          "questions": [
-            "在你负责的“智慧营销作业平台”项目中，你提到使用了 Flink 与 Kafka 进行实时数据流处理。请详细说明该系统的流式架构设计",
-            ...
-        ]
-        }}
-    """
 
         # (3) 场景分析题
         scenario_prompt = f"""
@@ -287,8 +267,69 @@ class RAGPipeline:
             )
 
         basic_questions = _ask_llm(basic_prompt, temperature=0.3)
+        basic_questions = basic_questions[:basic_count]
+        # 需要加入到 project prompt 里避免重复
+        previous_basic = "\n".join([f"- {q}" for q in basic_questions])
+        # (2) 项目经验题
+        project_prompt = f"""
+           你是一名资深系统架构面试官，请基于候选人的项目经历，
+           生成 {project_count} 道项目深度问题。
+
+           避免与以下基础题重复：
+           {previous_basic}
+           要求：
+           - 每题必须引用项目名称；
+           - 明确考察候选人项目中的设计思路、技术实现、性能优化或系统稳定性；
+           - 优先结合简历中出现的具体技术（如 Flink、Kafka、Redis、WebSocket 等）；
+           - 问题要足够详细、具体；
+           - 严格输出 JSON 格式。
+
+           【候选人项目经历】
+           {base_info}
+
+           【输出示例】
+               {{
+                 "questions": [
+                   "在你负责的“智慧营销作业平台”项目中，你提到使用了 Flink 与 Kafka 进行实时数据流处理。请详细说明该系统的流式架构设计",
+                   ...
+               ]
+               }}
+           """
+
         project_questions = _ask_llm(project_prompt, temperature=0.5)
-        scenario_questions = _ask_llm(scenario_prompt, temperature=0.6)
+        project_questions = project_questions[:project_count]
+
+        previous_basic_and_project = "\n".join(
+            [f"- {q}" for q in (basic_questions + project_questions)]
+        )
+        # (3) 场景分析题
+        scenario_prompt = f"""
+            你是一名企业技术面试官，请根据岗位描述（JD）与候选人简历信息，
+            生成 {scenario_count} 道场景分析题。
+            
+            避免与已有题目重复：
+            {previous_basic_and_project}
+
+            要求：
+            - 每题描述一个真实业务场景,业务场景要足够详细清晰，让候选人分析问题与解决方案；
+            - 问题应结合候选人项目背景与技术栈；
+            - 严格输出 JSON 格式。
+
+            【岗位信息（JD）】
+            {jd_context}
+
+            【候选人简历摘要】
+            {base_info}
+
+            【输出示例】
+                {{
+                  "questions": [
+                    "假设你在“企业智能客服平台”项目中遇到如下场景：系统每日处理上百万次用户消息请求；WebSocket 长连接频繁断开；Redis 缓存命中率降低，响应时间上升。请分析：可能的性能瓶颈来源；如何在服务端架构上改进（包括连接管理、缓存策略与异步任务设计）；",
+                    ...
+                  ]
+                }}
+            """
+        scenario_questions = _ask_llm(scenario_prompt, temperature=0.6)[:scenario_count]
 
         # ---------------------------------------------------------------------
         # 7️⃣ 汇总结果
@@ -297,7 +338,7 @@ class RAGPipeline:
         all_questions = [q for q in all_questions if q.strip()]  # 清理空项
 
         return {
-            "questions": all_questions[:9],
+            "questions": all_questions,
             "context_used": {
                 "memory_context": ctx,
                 "jd_context_preview": jd_context[:500],

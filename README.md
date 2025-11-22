@@ -149,7 +149,9 @@ curl -X POST http://localhost:5000/memory/push -H "Content-Type: application/jso
 | `jd_top_k` | `int` | ❌ | JD 检索数量（默认 2）                        |
 | `memory_top_k` | `int` | ❌ | 记忆检索数量（默认 3）                         |
 | `max_chars` | `int` | ❌ | 拼接上下文最大长度（默认 4000）                   |
-
+| `basic_count` | `int` | ❌ | 基础知识题数量（默认 3） 
+| `project_count` | `int` | ❌ | 项目深度题数量（默认 3） 
+| `scenario_count` | `int` | ❌ | 场景分析题数量（默认 3） 
 ---
 
 ## 📘 一、普通问答模式（`app=default`）
@@ -188,6 +190,9 @@ curl -X POST http://localhost:8001/query \
   "memory_id": "interv-001",
   "resume_url": "resume/zhangsan.json",
   "jd_id": "b5c1e8c4-bf61-4c8a-bc5b-7c2834a26d1c"
+  "basic_count": 3,
+  "project_count": 3,
+  "scenario_count": 3
 }'
 ```
 #### 响应示例
@@ -220,6 +225,9 @@ curl -X POST http://localhost:8001/query \
   "resume_url": "resume/lisi.json",
   "company": "字节跳动",
   "target_position": "后端开发工程师"
+  "basic_count": 3,
+  "project_count": 3,
+  "scenario_count": 3
 }'
 ```
 #### 响应示例
