@@ -1,68 +1,10 @@
-# Python bytecode files
+.venv/
+backend/.venv/
+__pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
-*.pyd
-__pycache__/
-*.pdb
-
-# Virtual environments
-env/
-venv/
-*.env
-*.env.*
-
-# Distribution / packaging
-*.egg-info/
-dist/
-build/
-*.tar.gz
-*.deb
-
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Log files
-logs/
-*.log
-
-# Docker files
-docker-compose.override.yml
-Dockerfile*
-*.dockerfile
-
-# Environment variables (Sensitive information)
-.env
-.env.example
-
-# MinIO buckets & backups (temporary data)
-*.minio
-
-# Weaviate database and metadata
-weaviate_data/
 *.db
-
-# Unit test / coverage reports
-.coverage
-nosetests.xml
-pytest.xml
-*.cover
-*.tox
-*.nox
-*.coverage.*
-
-# Jupyter Notebooks
-.ipynb_checkpoints/
-
-# macOS
-.DS_Store
-
-# Windows
-Thumbs.db
-Desktop.ini
-
-# Other
-*.bak
-*.tmp
+*.worker.lock
+backend/.env
+.mock_warehouse/
