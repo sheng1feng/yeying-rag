@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from knowledge.schemas.warehouse import SourceBindingResponse
+
 
 class KBConfig(BaseModel):
     chunk_size: int = 800
@@ -43,3 +45,33 @@ class KBStatsResponse(BaseModel):
     chunks_count: int
     latest_task_status: str | None = None
     latest_task_finished_at: datetime | None = None
+
+
+class KBRecentTaskResponse(BaseModel):
+    id: int
+    task_type: str
+    status: str
+    source_paths: list[str]
+    created_at: datetime
+    finished_at: datetime | None = None
+
+
+class KBBindingStatusCountsResponse(BaseModel):
+    total: int
+    enabled: int
+    disabled: int
+    indexed: int
+    syncing: int
+    failed: int
+    pending_sync: int
+
+
+class KBWorkbenchResponse(BaseModel):
+    kb_id: int
+    kb_name: str
+    kb_description: str
+    kb_status: str
+    stats: KBStatsResponse
+    binding_status_counts: KBBindingStatusCountsResponse
+    bindings: list[SourceBindingResponse]
+    recent_tasks: list[KBRecentTaskResponse]

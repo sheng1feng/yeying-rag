@@ -208,11 +208,9 @@
 
             <div class="card">
               <div class="section-header">
-                <h2>操作提示</h2>
+                <h2>知识库工作台</h2>
               </div>
-              <div class="hint-box">
-                在「资产仓库」里浏览到目录或文件后，可以直接把路径填入这里，也可以使用列表里的“绑定到当前知识库 / 导入到当前知识库”按钮。
-              </div>
+              <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
             </div>
           </div>
         </section>
@@ -285,18 +283,24 @@
               <div class="section-header">
                 <h2>创建导入任务</h2>
               </div>
-              <div class="form-grid">
-                <input id="task-kb-id" placeholder="目标知识库 ID" />
-                <div class="path-input-wrap">
-                  <input id="task-source-path" data-path-field="task-source-path" placeholder="源路径，例如 /personal/uploads/a.txt" />
-                </div>
-                <div class="toolbar">
-                  <button id="create-import-task">创建导入任务</button>
-                  <button id="create-reindex-task" class="secondary">创建重建任务</button>
-                  <button id="create-delete-task" class="danger">创建删除任务</button>
-                </div>
-              </div>
-            </div>
+	              <div class="form-grid">
+	                <input id="task-kb-id" placeholder="目标知识库 ID" />
+	                <div class="path-input-wrap">
+	                  <input id="task-source-path" data-path-field="task-source-path" placeholder="源路径，例如 /personal/uploads/a.txt" />
+	                </div>
+	                <div class="toolbar">
+	                  <button id="create-import-task">创建导入任务</button>
+	                  <button id="create-reindex-task" class="secondary">创建重建任务</button>
+	                  <button id="create-delete-task" class="danger">创建删除任务</button>
+	                </div>
+	              </div>
+	              <div class="helper">如果当前知识库已经配置好绑定源，推荐直接使用下面的“按绑定源创建任务”，避免继续手填路径。</div>
+	              <div class="toolbar">
+	                <button id="create-import-from-bindings" class="secondary">导入全部绑定源</button>
+	                <button id="create-reindex-from-bindings" class="secondary">重建全部绑定源</button>
+	                <button id="create-delete-from-bindings" class="danger">删除全部绑定源索引</button>
+	              </div>
+	            </div>
             <div class="card">
               <div class="section-header">
                 <h2>任务执行</h2>
@@ -398,6 +402,7 @@
               </div>
               <div class="form-grid">
                 <input id="short-session-id" placeholder="session_id" value="demo-session" />
+                <input id="short-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
                 <select id="short-memory-type">
                   <option value="recent_turn">recent_turn</option>
                   <option value="summary">summary</option>
@@ -456,6 +461,7 @@
               </div>
               <div class="form-grid">
                 <input id="context-session-id" value="demo-session" placeholder="session_id" />
+                <input id="context-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
                 <input id="context-kb-ids" placeholder="知识库 ID，多个用逗号分隔" />
                 <input id="context-query" placeholder="query" />
                 <textarea id="context-answer" placeholder="可选：贴入 bot / assistant 最终回答，用于自动沉淀长期/短期记忆"></textarea>
@@ -464,7 +470,7 @@
                   <button class="secondary" id="ingest-memory-context">沉淀本轮记忆</button>
                 </div>
               </div>
-              <div class="helper">推荐流程：先生成上下文，再将最终回答贴入上方输入框，点击“沉淀本轮记忆”。</div>
+              <div class="helper">推荐流程：先生成上下文，再将最终回答贴入上方输入框，点击“沉淀本轮记忆”。若同一钱包下要验证多个机器人隔离，请给不同机器人填写不同的 `memory_namespace`。</div>
               <div id="context-results" class="code"></div>
             </div>
           </div>
@@ -678,6 +684,8 @@
       </div>
     </div>
 
+    <script src="/static/js/kb_workbench.js"></script>
+    <script src="/static/js/tasks_panel.js"></script>
     <script src="/static/js/app.js"></script>
   </body>
   </html>

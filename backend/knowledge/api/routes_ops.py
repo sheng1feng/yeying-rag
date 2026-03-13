@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from knowledge.api.deps import get_current_wallet
 from knowledge.db.session import get_db
 from knowledge.models import ImportedChunk, ImportedDocument, ImportTask, KnowledgeBase, LongTermMemory, MemoryIngestionEvent, ShortTermMemory, UploadRecord, WorkerStatus
 from knowledge.core.settings import get_settings
@@ -13,7 +14,7 @@ from knowledge.services.vector_store import build_vector_store
 from knowledge.utils.time import utc_now
 
 
-router = APIRouter(prefix="/ops", tags=["ops"])
+router = APIRouter(prefix="/ops", tags=["ops"], dependencies=[Depends(get_current_wallet)])
 
 
 @router.get("/overview")
@@ -77,21 +78,31 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.get("/tasks/failures")
-def recent_task_failures(limit: int = 10, db: Session = Depends(get_db)) -> list[dict]:
+def recent_task_failures(trace_id: str | None = None, limit: int = 10, db: Session = Depends(get_db)) -> list[dict]:
+    query_limit = max(limit, 100) if trace_id else limit
     rows = list(
         db.scalars(
             select(ImportTask)
             .where(ImportTask.status.in_(["failed", "partial_success"]))
             .order_by(ImportTask.finished_at.desc(), ImportTask.created_at.desc())
-            .limit(limit)
+            .limit(query_limit)
         ).all()
     )
+    if trace_id:
+        rows = [
+            row
+            for row in rows
+            if (row.stats_json or {}).get("trace_id") == trace_id
+            or trace_id in ((row.stats_json or {}).get("related_trace_ids") or [])
+        ]
+        rows = rows[:limit]
     return [
         {
             "id": row.id,
             "kb_id": row.kb_id,
             "task_type": row.task_type,
             "status": row.status,
+            "trace_id": (row.stats_json or {}).get("trace_id", ""),
             "source_paths": row.source_paths,
             "error_message": row.error_message,
             "stats_json": row.stats_json,

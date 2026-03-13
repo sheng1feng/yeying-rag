@@ -9,12 +9,16 @@
 - `knowledge` 代理浏览 `warehouse` 资产
 - `knowledge` 上传文件到 `warehouse personal`
 - 手动导入 / 重建 / 删除的轻量异步任务
+- 按知识库绑定源批量创建导入 / 重建 / 删除任务
+- 绑定源状态管理（启用/停用、同步状态、最近任务、索引覆盖摘要）
 - 导入治理：任务明细、重试、未变更跳过
-- 运维能力：worker 心跳、运行概览、存储健康检查
+- 运维能力：worker 心跳、数据库租约协调、运行概览、存储健康检查
 - 文档解析、按文件类型 chunk、embedding、索引
 - 长期记忆与短期记忆 CRUD
 - 检索与 retrieval-context API
+- 分层 retrieval APIs 与统一 context 调用入口
 - 产品化前台管理台
+- 知识库工作台视图
 
 ## 目录
 
@@ -22,6 +26,8 @@
 - `tests`: 后端测试
 - `docs/api-integration.md`: 外部服务 API 接入文档
 - `docs/console-operations.md`: 控制台操作手册
+- `docs/prd-bot-knowledge.md`: bot/chat 产品重构 PRD
+- `docs/technical-design-m1-m2.md`: M1 / M2 技术方案
 
 ## 运行
 
@@ -61,6 +67,12 @@ python -m knowledge.workers.runner
 - `VECTOR_STORE_MODE=weaviate`
 - `MODEL_PROVIDER_MODE=openai_compatible`
 
+当前测试与验证口径：
+
+- 已覆盖 `db` / `weaviate` 在过滤语义上的一致性验证
+- 已覆盖 `mock` / `openai_compatible` embedding provider 的调用契约验证
+- 不把不同向量后端的相似度分值或排序完全一致作为当前版本保证
+
 ## 关键环境变量
 
 - `DATABASE_URL`
@@ -83,6 +95,7 @@ python -m knowledge.workers.runner
 - `RERANK_API_BASE`
 - `RERANK_API_KEY`
 - `WORKER_NAME`
+- `WORKER_RUN_LEASE_TTL_SECONDS`
 
 ## `warehouse` 代理约定
 
@@ -110,3 +123,5 @@ python -m knowledge.workers.runner
 
 - 外部服务接入：`docs/api-integration.md`
 - 控制台操作手册：`docs/console-operations.md`
+- 产品重构 PRD：`docs/prd-bot-knowledge.md`
+- M1 / M2 技术方案：`docs/technical-design-m1-m2.md`

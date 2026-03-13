@@ -8,6 +8,7 @@ const state = {
   selectedTaskDetail: null,
   selectedTaskItems: [],
   currentKBStats: null,
+  currentKBWorkbench: null,
   warehouseBound: false,
   currentBrowsePath: "/personal",
   kbs: [],
@@ -136,42 +137,21 @@ function formatDuration(startValue, endValue) {
 }
 
 function toneForTaskStatus(status) {
-  const value = String(status || "").toLowerCase();
-  if (value === "succeeded") return "success";
-  if (value === "canceled") return "info";
-  if (value === "failed") return "danger";
-  if (value === "cancel_requested") return "warning";
-  if (value === "partial_success") return "warning";
-  return "warning";
+  return window.KnowledgeTasksPanel?.toneForTaskStatus
+    ? window.KnowledgeTasksPanel.toneForTaskStatus(status)
+    : "warning";
 }
 
 function toneForTaskItemStatus(status) {
-  const value = String(status || "").toLowerCase();
-  if (["indexed", "deleted", "succeeded"].includes(value)) return "success";
-  if (value === "rolled_back") return "info";
-  if (value === "skipped") return "info";
-  if (value === "failed") return "danger";
-  return "warning";
+  return window.KnowledgeTasksPanel?.toneForTaskItemStatus
+    ? window.KnowledgeTasksPanel.toneForTaskItemStatus(status)
+    : "warning";
 }
 
 function describeTaskQueue(task = {}) {
-  if (task.status === "running") {
-    return "执行中";
-  }
-  if (task.status === "cancel_requested") {
-    return "取消中，等待当前文件处理完成后自动回退";
-  }
-  if (task.status === "canceled") {
-    return "已取消";
-  }
-  if (task.status === "pending") {
-    const queueLabel = task.queue_position ? `排队中 · 第 ${task.queue_position} 位` : "排队中";
-    if (task.current_running_task_type) {
-      return `${queueLabel} · 当前执行 ${task.current_running_task_type} #${task.current_running_task_id}`;
-    }
-    return queueLabel;
-  }
-  return "已完成";
+  return window.KnowledgeTasksPanel?.describeTaskQueue
+    ? window.KnowledgeTasksPanel.describeTaskQueue(task)
+    : "已完成";
 }
 
 function isTaskActiveStatus(status) {
@@ -248,6 +228,7 @@ function toneForMemoryEvent(event = {}) {
 function summarizeMemoryEvent(event = {}) {
   const notes = event.notes_json || {};
   const operation = String(notes.operation || "");
+  const memoryNamespace = String(notes.memory_namespace || "");
   if (operation === "delete_long_term" || operation === "delete_short_term") {
     const isLongTerm = operation === "delete_long_term";
     const memoryLabel = isLongTerm ? "长期记忆" : "短期记忆";
@@ -259,7 +240,7 @@ function summarizeMemoryEvent(event = {}) {
       detail: `短期删除 ${formatNumber(notes.deleted_short_term || 0)} · 长期删除 ${formatNumber(notes.deleted_long_term || 0)} · ${event.source || "console"}`,
       secondary: isLongTerm
         ? `分类：${notes.category || "-"} · 原来源：${notes.memory_source || "-"}`
-        : `session=${event.session_id || "-"} · 类型：${notes.memory_type || "-"}`,
+        : `session=${event.session_id || "-"} · namespace=${memoryNamespace || "-"} · 类型：${notes.memory_type || "-"}`,
       nextLabel: "返回记忆",
       nextView: "memory",
     };
@@ -270,7 +251,7 @@ function summarizeMemoryEvent(event = {}) {
     title: `session=${event.session_id}`,
     subtitle: event.query_preview || "自动沉淀事件",
     detail: `短期 ${formatNumber(event.short_term_created)} · 长期 ${formatNumber(event.long_term_created)} · ${event.source}`,
-    secondary: event.answer_preview ? `回答摘要：${event.answer_preview}` : "",
+    secondary: `${memoryNamespace ? `namespace=${memoryNamespace} · ` : ""}${event.answer_preview ? `回答摘要：${event.answer_preview}` : ""}`.trim(),
     nextLabel: "继续检索",
     nextView: "retrieval",
   };
@@ -440,6 +421,7 @@ function clearSession() {
   state.selectedTaskDetail = null;
   state.selectedTaskItems = [];
   state.currentKBStats = null;
+  state.currentKBWorkbench = null;
   localStorage.removeItem("knowledge_token");
   localStorage.removeItem("knowledge_wallet");
   closeDrawer();
@@ -634,6 +616,28 @@ function renderCurrentKBStats() {
       <div class="helper">${formatDate(state.currentKBStats.latest_task_finished_at)}</div>
     </div>
   `;
+}
+
+function renderKBWorkbench() {
+  const box = el("kb-workbench");
+  if (!box) return;
+  const helper = window.KnowledgeKBWorkbench;
+  if (helper?.renderWorkbench) {
+    box.className = "card-shell";
+    box.innerHTML = helper.renderWorkbench({
+      selectedKB: state.selectedKB,
+      workbench: state.currentKBWorkbench,
+      helpers: { escapeHtml, formatDate, formatNumber },
+    });
+    return;
+  }
+  if (!state.selectedKB || !state.currentKBWorkbench) {
+    box.className = "empty";
+    box.textContent = "请选择知识库后查看绑定状态、最近任务和同步建议。";
+    return;
+  }
+  box.className = "code";
+  box.textContent = JSON.stringify(state.currentKBWorkbench, null, 2);
 }
 
 function openDrawer(title, data) {
@@ -874,6 +878,16 @@ function closePathPicker() {
 
 function renderTaskDetail(task = state.selectedTaskDetail, items = state.selectedTaskItems) {
   const box = el("task-detail");
+  if (window.KnowledgeTasksPanel?.renderTaskDetail) {
+    const payload = window.KnowledgeTasksPanel.renderTaskDetail({
+      task,
+      items,
+      helpers: { escapeHtml, formatDate, formatDuration, formatNumber },
+    });
+    box.className = payload.className || "";
+    box.innerHTML = payload.html;
+    return;
+  }
   if (!task) {
     box.className = "empty";
     box.textContent = "点击任务列表中的“详情”查看 task item 明细。";
@@ -1358,11 +1372,15 @@ async function refreshKBs() {
 async function refreshCurrentKBStats() {
   if (!state.selectedKB) {
     state.currentKBStats = null;
+    state.currentKBWorkbench = null;
     renderCurrentKBStats();
+    renderKBWorkbench();
     return;
   }
-  state.currentKBStats = await api(`/kbs/${state.selectedKB.id}/stats`);
+  state.currentKBWorkbench = await api(`/kbs/${state.selectedKB.id}/workbench`);
+  state.currentKBStats = state.currentKBWorkbench.stats;
   renderCurrentKBStats();
+  renderKBWorkbench();
 }
 
 function renderKBList() {
@@ -1491,29 +1509,20 @@ async function refreshBindings() {
 
 function renderBindings() {
   const list = el("binding-list");
+  const helper = window.KnowledgeKBWorkbench;
+  if (helper?.renderBindings) {
+    list.innerHTML = helper.renderBindings({
+      selectedKB: state.selectedKB,
+      bindings: state.bindings,
+      helpers: { escapeHtml, formatDate, formatNumber },
+    });
+    return;
+  }
   if (!state.selectedKB) {
     list.innerHTML = `<div class="empty">先选中一个知识库。</div>`;
     return;
   }
-  if (!state.bindings.length) {
-    list.innerHTML = `<div class="empty">当前知识库还没有绑定源。</div>`;
-    return;
-  }
-  list.innerHTML = state.bindings
-    .map(
-      (binding) => `
-        <div class="list-item">
-          <div class="list-title">${escapeHtml(binding.source_path)}</div>
-          <div class="list-subtitle">${binding.scope_type} · ${binding.enabled ? "enabled" : "disabled"}</div>
-          <div class="list-actions">
-            <button class="ghost" data-action="import-path" data-path="${binding.source_path}">导入</button>
-            <button class="ghost" data-action="open-browse-path" data-path="${binding.source_path}">定位</button>
-            <button class="danger" data-action="delete-binding" data-binding-id="${binding.id}">解绑</button>
-          </div>
-        </div>
-      `,
-    )
-    .join("");
+  list.innerHTML = `<div class="code">${escapeHtml(JSON.stringify(state.bindings, null, 2))}</div>`;
 }
 
 async function previewWarehouseFile(path) {
@@ -1545,6 +1554,26 @@ async function deleteBinding(bindingId) {
   const confirmed = await confirmAction("解绑源路径", "解绑后不会删除 warehouse 原文件，但后续不会继续从该路径导入。");
   if (!confirmed) return;
   const result = await api(`/kbs/${kbId}/bindings/${bindingId}`, { method: "DELETE" });
+  setOutput(result);
+  await refreshBindings();
+  await refreshCurrentKBStats();
+}
+
+async function updateBindingEnabled(bindingId, enabled) {
+  const kbId = currentKBOrThrow();
+  const actionLabel = enabled ? "启用" : "停用";
+  const confirmed = await confirmAction(
+    `${actionLabel}绑定源`,
+    enabled
+      ? "启用后，该绑定源会重新参与按绑定源创建的导入/重建/删除任务。"
+      : "停用后，该绑定源不会参与按绑定源创建的导入/重建/删除任务，但已索引文档不会自动删除。",
+  );
+  if (!confirmed) return;
+  const result = await api(`/kbs/${kbId}/bindings/${bindingId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: Boolean(enabled) }),
+  });
   setOutput(result);
   await refreshBindings();
   await refreshCurrentKBStats();
@@ -1661,6 +1690,33 @@ async function createTask(taskType) {
   await refreshTasks();
 }
 
+function enabledBindingIds() {
+  return (state.bindings || []).filter((binding) => binding.enabled).map((binding) => Number(binding.id));
+}
+
+async function createTaskFromBindings(taskType, bindingIds = []) {
+  const kbId = currentKBOrThrow();
+  const resolvedBindingIds = (bindingIds || []).map((value) => Number(value)).filter((value) => value > 0);
+  if (!resolvedBindingIds.length && !enabledBindingIds().length) {
+    throw new Error("当前知识库没有可用的已启用绑定源");
+  }
+  if (taskType === "delete") {
+    const targetCount = resolvedBindingIds.length || enabledBindingIds().length;
+    const confirmed = await confirmAction(
+      "按绑定源删除索引",
+      `将为 ${targetCount} 个绑定源创建删除任务，并清理这些绑定源对应的已索引文档。warehouse 原文件不会被删除。`,
+    );
+    if (!confirmed) return;
+  }
+  const result = await api(`/kbs/${kbId}/tasks/${taskType}-from-bindings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ binding_ids: resolvedBindingIds }),
+  });
+  setOutput(result);
+  await refreshTasks();
+}
+
 async function createImportTask(path = null) {
   if (path) {
     el("task-source-path").value = path;
@@ -1668,12 +1724,24 @@ async function createImportTask(path = null) {
   await createTask("import");
 }
 
+async function createImportTaskFromBindings(bindingIds = []) {
+  await createTaskFromBindings("import", bindingIds);
+}
+
 async function createReindexTask() {
   await createTask("reindex");
 }
 
+async function createReindexTaskFromBindings(bindingIds = []) {
+  await createTaskFromBindings("reindex", bindingIds);
+}
+
 async function createDeleteTask() {
   await createTask("delete");
+}
+
+async function createDeleteTaskFromBindings(bindingIds = []) {
+  await createTaskFromBindings("delete", bindingIds);
 }
 
 async function retryTask(taskId) {
@@ -1724,6 +1792,17 @@ async function refreshTasks() {
   const tasks = statusFilter ? state.tasks.filter((task) => task.status === statusFilter) : state.tasks;
   if (!tasks.length) {
     list.innerHTML = `<div class="empty">暂无任务。</div>`;
+    renderTaskDetail();
+    renderRecentActivity();
+    ensureTaskPolling();
+    return;
+  }
+  if (window.KnowledgeTasksPanel?.renderTaskList) {
+    list.innerHTML = window.KnowledgeTasksPanel.renderTaskList({
+      tasks,
+      selectedTaskId: state.selectedTaskId,
+      helpers: { escapeHtml, formatDate },
+    });
     renderTaskDetail();
     renderRecentActivity();
     ensureTaskPolling();
@@ -1916,7 +1995,11 @@ async function deleteLongMemory(memoryId) {
 
 async function refreshShortMemory() {
   const sessionId = el("short-session-id").value || "";
-  state.shortMemories = await api(`/memory/short-term?session_id=${encodeURIComponent(sessionId)}`);
+  const memoryNamespace = el("short-memory-namespace").value.trim();
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session_id", sessionId);
+  if (memoryNamespace) params.set("memory_namespace", memoryNamespace);
+  state.shortMemories = await api(`/memory/short-term?${params.toString()}`);
   const list = el("short-memory-list");
   if (!state.shortMemories.length) {
     list.innerHTML = `<div class="empty">当前 session 暂无短期记忆。</div>`;
@@ -1928,7 +2011,10 @@ async function refreshShortMemory() {
         <div class="list-item">
           <div class="list-head">
             <div class="list-title">${escapeHtml(memory.memory_type)}</div>
-            <span class="pill">${escapeHtml(memory.session_id)}</span>
+            <div>
+              <span class="pill">${escapeHtml(memory.session_id)}</span>
+              ${memory.memory_namespace ? `<span class="pill">${escapeHtml(memory.memory_namespace)}</span>` : ""}
+            </div>
           </div>
           <div class="list-subtitle">${escapeHtml(memory.content)}</div>
           <div class="list-actions">
@@ -1983,6 +2069,7 @@ function renderMemoryIngestions() {
 async function saveShortMemory() {
   const payload = {
     session_id: el("short-session-id").value.trim(),
+    memory_namespace: el("short-memory-namespace").value.trim() || null,
     memory_type: el("short-memory-type").value,
     content: el("short-memory-content").value.trim(),
   };
@@ -2046,6 +2133,7 @@ async function searchKB() {
 
 async function buildContext() {
   const sessionId = el("context-session-id").value.trim();
+  const memoryNamespace = el("context-memory-namespace").value.trim();
   const kbIds = el("context-kb-ids")
     .value.split(",")
     .map((item) => Number(item.trim()))
@@ -2054,10 +2142,28 @@ async function buildContext() {
   if (!sessionId || !kbIds.length || !query) {
     throw new Error("session_id、kb_ids、query 都不能为空");
   }
-  const result = await api("/retrieval-context", {
+  el("short-session-id").value = sessionId;
+  el("short-memory-namespace").value = memoryNamespace;
+  const result = await api("/retrieval/context", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, kb_ids: kbIds, query }),
+    body: JSON.stringify({
+      query,
+      conversation: {
+        session_id: sessionId,
+        memory_namespace: memoryNamespace || null,
+      },
+      scope: {
+        kb_ids: kbIds,
+        source_scope: [],
+        filters: {},
+      },
+      policy: {},
+      caller: {
+        app_name: "knowledge-console",
+      },
+      debug: true,
+    }),
   });
   state.lastContextResult = result;
   el("context-results").textContent = JSON.stringify(result, null, 2);
@@ -2067,6 +2173,7 @@ async function buildContext() {
 
 async function ingestMemoryFromContext() {
   const sessionId = el("context-session-id").value.trim();
+  const memoryNamespace = el("context-memory-namespace").value.trim();
   const kbIds = el("context-kb-ids")
     .value.split(",")
     .map((item) => Number(item.trim()))
@@ -2077,17 +2184,22 @@ async function ingestMemoryFromContext() {
     throw new Error("请先填写 session_id 和 query");
   }
   el("short-session-id").value = sessionId;
+  el("short-memory-namespace").value = memoryNamespace;
   const result = await api("/memory/ingest", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       session_id: sessionId,
+      memory_namespace: memoryNamespace || null,
       kb_id: kbIds[0] || state.selectedKB?.id || null,
       query,
       answer,
       source: "console",
-      trace_id: state.lastContextResult?.trace_id || "",
-      source_refs: state.lastContextResult?.source_refs || [],
+      trace_id: state.lastContextResult?.trace?.trace_id || state.lastContextResult?.trace_id || "",
+      source_refs:
+        state.lastContextResult?.knowledge?.source_refs ||
+        state.lastContextResult?.source_refs ||
+        [],
     }),
   });
   setOutput(result);
@@ -2132,6 +2244,7 @@ function renderAll() {
   updateSelectedKBUI();
   renderKBList();
   renderBindings();
+  renderKBWorkbench();
   renderWarehouseEntries();
   renderWarehousePreview();
   renderDocuments();
@@ -2204,6 +2317,15 @@ function attachStaticEvents() {
   el("create-import-task").addEventListener("click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
   el("create-reindex-task").addEventListener("click", () => withFeedback(createReindexTask, "重建任务已创建")().catch(() => {}));
   el("create-delete-task").addEventListener("click", () => withFeedback(createDeleteTask, "删除任务已创建")().catch(() => {}));
+  el("create-import-from-bindings").addEventListener("click", () =>
+    withFeedback(createImportTaskFromBindings, "已按绑定源创建导入任务")().catch(() => {}),
+  );
+  el("create-reindex-from-bindings").addEventListener("click", () =>
+    withFeedback(createReindexTaskFromBindings, "已按绑定源创建重建任务")().catch(() => {}),
+  );
+  el("create-delete-from-bindings").addEventListener("click", () =>
+    withFeedback(createDeleteTaskFromBindings, "已按绑定源创建删除任务")().catch(() => {}),
+  );
   el("clear-task-filter").addEventListener("click", () => {
     el("task-status-filter").value = "";
     refreshTasks().catch((err) => {
@@ -2354,6 +2476,22 @@ function attachStaticEvents() {
     }
     if (action === "import-path") {
       withFeedback(() => createImportTask(target.dataset.path), "导入任务已创建")().catch(() => {});
+      return;
+    }
+    if (action === "import-binding") {
+      withFeedback(() => createImportTaskFromBindings([Number(target.dataset.bindingId)]), "已按绑定源创建导入任务")().catch(() => {});
+      return;
+    }
+    if (action === "reindex-binding") {
+      withFeedback(() => createReindexTaskFromBindings([Number(target.dataset.bindingId)]), "已按绑定源创建重建任务")().catch(() => {});
+      return;
+    }
+    if (action === "disable-binding") {
+      withFeedback(() => updateBindingEnabled(Number(target.dataset.bindingId), false), "绑定源已停用")().catch(() => {});
+      return;
+    }
+    if (action === "enable-binding") {
+      withFeedback(() => updateBindingEnabled(Number(target.dataset.bindingId), true), "绑定源已启用")().catch(() => {});
       return;
     }
     if (action === "open-browse-path") {

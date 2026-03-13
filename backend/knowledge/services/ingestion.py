@@ -52,6 +52,19 @@ class IngestionService:
         return task
 
     def process_task(self, db: Session, task: ImportTask) -> ImportTask:
+        db.refresh(task)
+        if task.status in {"cancel_requested", "canceled"}:
+            task.status = "canceled"
+            task.error_message = "canceled by user"
+            task.started_at = task.started_at or utc_now()
+            task.finished_at = utc_now()
+            task.stats_json = {
+                **(task.stats_json or {}),
+                "canceled": True,
+                "rollback": {"applied": False, "reason": "task canceled before execution"},
+            }
+            db.commit()
+            return task
         task.status = "running"
         task.started_at = utc_now()
         task.error_message = ""
@@ -144,6 +157,10 @@ class IngestionService:
         db.refresh(task)
         return task
 
+    def delete_document_index(self, db: Session, document: ImportedDocument) -> None:
+        self._delete_document_state(db, document)
+        db.delete(document)
+
     def _iter_files(self, db: Session, wallet_address: str, source_path: str) -> list[WarehouseFileEntry]:
         access_token = self._get_access_token_for_path_if_needed(db, wallet_address, source_path)
         entries = self.warehouse_gateway.browse(wallet_address, source_path, access_token=access_token)
@@ -158,6 +175,71 @@ class IngestionService:
                 files.extend(self._iter_files(db, wallet_address, entry.path))
         return files
 
+    @staticmethod
+    def _normalize_source_path(path: str) -> str:
+        normalized = "/" + str(path or "/").strip().lstrip("/")
+        return normalized.rstrip("/") or "/"
+
+    def _find_related_binding(self, db: Session, kb_id: int, source_path: str) -> SourceBinding | None:
+        normalized_source_path = self._normalize_source_path(source_path)
+        bindings = list(
+            db.scalars(
+                select(SourceBinding)
+                .where(SourceBinding.kb_id == kb_id)
+                .where(SourceBinding.enabled.is_(True))
+            ).all()
+        )
+        best_binding: SourceBinding | None = None
+        best_priority: tuple[int, int] | None = None
+        for binding in bindings:
+            binding_path = self._normalize_source_path(binding.source_path)
+            scope_type = str(binding.scope_type or "file").strip().lower()
+            priority: tuple[int, int] | None = None
+            if scope_type == "directory":
+                if normalized_source_path == binding_path:
+                    priority = (2, len(binding_path))
+                elif binding_path != "/" and normalized_source_path.startswith(f"{binding_path}/"):
+                    priority = (1, len(binding_path))
+                elif binding_path == "/":
+                    priority = (1, 1)
+            elif normalized_source_path == binding_path:
+                priority = (3, len(binding_path))
+            if priority is None:
+                continue
+            if best_priority is None or priority > best_priority:
+                best_binding = binding
+                best_priority = priority
+        return best_binding
+
+    def _list_documents_for_delete(self, db: Session, task: ImportTask) -> list[ImportedDocument]:
+        normalized_source_paths = [self._normalize_source_path(path) for path in task.source_paths if str(path or "").strip()]
+        if not normalized_source_paths:
+            return []
+        documents = list(
+            db.scalars(
+                select(ImportedDocument)
+                .where(ImportedDocument.kb_id == task.kb_id)
+                .where(ImportedDocument.owner_wallet_address == task.owner_wallet_address)
+                .order_by(ImportedDocument.source_path.asc(), ImportedDocument.id.asc())
+            ).all()
+        )
+        matched_documents: list[ImportedDocument] = []
+        matched_ids: set[int] = set()
+        for document in documents:
+            document_path = self._normalize_source_path(document.source_path)
+            for source_path in normalized_source_paths:
+                if source_path == "/":
+                    matched = True
+                else:
+                    matched = document_path == source_path or document_path.startswith(f"{source_path}/")
+                if not matched:
+                    continue
+                if document.id not in matched_ids:
+                    matched_documents.append(document)
+                    matched_ids.add(document.id)
+                break
+        return matched_documents
+
     def _index_file(self, db: Session, task: ImportTask, file_entry: WarehouseFileEntry, rollback_plan: dict[str, dict]) -> tuple[int, str]:
         kb = db.get(KnowledgeBase, task.kb_id)
         if kb is None:
@@ -169,12 +251,14 @@ class IngestionService:
         parsed_text = self.parser.parse(file_entry.name, content)
         if not parsed_text.strip():
             raise ValueError("parsed text is empty")
+        self._raise_if_cancel_requested(db, task, rollback_plan)
 
         config = {**self._default_config(), **(kb.retrieval_config or {})}
         file_type = infer_file_type(file_entry.name)
         chunks = self.chunker.chunk(file_entry.name, parsed_text, config)
         if not chunks:
             raise ValueError("no chunks created")
+        self._raise_if_cancel_requested(db, task, rollback_plan)
 
         document = db.scalar(
             select(ImportedDocument)
@@ -222,9 +306,11 @@ class IngestionService:
 
         use_db_vectors = self.settings.vector_store_mode != "weaviate"
         embeddings = self.embedding_provider.embed_texts([chunk.text for chunk in chunks]) if use_db_vectors else []
+        self._raise_if_cancel_requested(db, task, rollback_plan)
         vector_payloads: list[dict] = []
         created = 0
         for index, chunk_data in enumerate(chunks):
+            self._raise_if_cancel_requested(db, task, rollback_plan, rollback_current_transaction=True)
             chunk = ImportedChunk(
                 document_id=document.id,
                 kb_id=kb.id,
@@ -273,15 +359,12 @@ class IngestionService:
             created += 1
 
         if self.settings.vector_store_mode == "weaviate":
+            self._raise_if_cancel_requested(db, task, rollback_plan, rollback_current_transaction=True)
             self.vector_store.index_chunks(vector_payloads)
 
         document.chunk_count = created
         document.last_indexed_at = utc_now()
-        binding = db.scalar(
-            select(SourceBinding)
-            .where(SourceBinding.kb_id == kb.id)
-            .where(SourceBinding.source_path == file_entry.path)
-        )
+        binding = self._find_related_binding(db, kb.id, file_entry.path)
         if binding is not None:
             binding.last_imported_at = utc_now()
         self._record_task_item(
@@ -298,15 +381,11 @@ class IngestionService:
         return created, "indexed"
 
     def _handle_delete(self, db: Session, task: ImportTask, rollback_plan: dict[str, dict]) -> int:
-        documents = db.scalars(
-            select(ImportedDocument)
-            .where(ImportedDocument.kb_id == task.kb_id)
-            .where(ImportedDocument.source_path.in_(task.source_paths))
-        ).all()
+        documents = self._list_documents_for_delete(db, task)
         deleted = 0
         for document in documents:
             self._capture_document_snapshot(db, task.kb_id, task.owner_wallet_address, document.source_path, rollback_plan)
-            self._delete_document_state(db, document)
+            self.delete_document_index(db, document)
             self._record_task_item(
                 db,
                 task_id=task.id,
@@ -317,7 +396,6 @@ class IngestionService:
                 processed_chunks=0,
                 source_version=document.source_etag_or_mtime,
             )
-            db.delete(document)
             deleted += 1
         db.commit()
         return deleted
@@ -377,11 +455,7 @@ class IngestionService:
             .where(ImportedDocument.owner_wallet_address == wallet_address)
             .where(ImportedDocument.source_path == source_path)
         )
-        binding = db.scalar(
-            select(SourceBinding)
-            .where(SourceBinding.kb_id == kb_id)
-            .where(SourceBinding.source_path == source_path)
-        )
+        binding = self._find_related_binding(db, kb_id, source_path)
         if document is None:
             rollback_plan[source_path] = {
                 "exists": False,
@@ -468,10 +542,27 @@ class IngestionService:
         db.execute(delete(EmbeddingRecord).where(EmbeddingRecord.chunk_id.in_(select(ImportedChunk.id).where(ImportedChunk.document_id == document.id))))
         db.execute(delete(ImportedChunk).where(ImportedChunk.document_id == document.id))
 
-    def _raise_if_cancel_requested(self, db: Session, task: ImportTask, rollback_plan: dict[str, dict]) -> None:
+    def _raise_if_cancel_requested(
+        self,
+        db: Session,
+        task: ImportTask,
+        rollback_plan: dict[str, dict],
+        rollback_current_transaction: bool = False,
+    ) -> None:
         db.refresh(task)
-        if task.status != "cancel_requested":
+        cancel_requested = task.status in {"cancel_requested", "canceled"}
+        if not cancel_requested:
             return
+        if rollback_current_transaction:
+            db.rollback()
+            task = db.get(ImportTask, task.id) or task
+        else:
+            db.refresh(task)
+        if task.status not in {"cancel_requested", "canceled"}:
+            task.status = "cancel_requested"
+            task.error_message = "cancel requested by user"
+            db.commit()
+            db.refresh(task)
         raise TaskCanceledError(self._rollback_task(db, task, rollback_plan))
 
     def _rollback_task(self, db: Session, task: ImportTask, rollback_plan: dict[str, dict]) -> dict:

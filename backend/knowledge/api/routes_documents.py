@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from knowledge.api.deps import get_current_wallet
 from knowledge.db.session import get_db
-from knowledge.models import EmbeddingRecord, ImportedChunk, ImportedDocument, KnowledgeBase
+from knowledge.models import ImportedChunk, ImportedDocument, KnowledgeBase
 from knowledge.services.filetypes import infer_file_type
+from knowledge.services.ingestion import IngestionService
 
 
 router = APIRouter(tags=["documents"])
+document_index_service = IngestionService()
 
 
 @router.get("/kbs/{kb_id}/documents")
@@ -83,10 +85,6 @@ def delete_document(kb_id: int, doc_id: int, wallet_address: str = Depends(get_c
     document = db.get(ImportedDocument, doc_id)
     if document is None or document.kb_id != kb_id:
         raise HTTPException(status_code=404, detail="document not found")
-    chunk_ids = [row[0] for row in db.execute(select(ImportedChunk.id).where(ImportedChunk.document_id == doc_id)).all()]
-    if chunk_ids:
-        db.execute(delete(EmbeddingRecord).where(EmbeddingRecord.chunk_id.in_(chunk_ids)))
-        db.execute(delete(ImportedChunk).where(ImportedChunk.id.in_(chunk_ids)))
-    db.delete(document)
+    document_index_service.delete_document_index(db, document)
     db.commit()
     return {"ok": True}

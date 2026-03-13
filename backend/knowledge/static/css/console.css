@@ -299,6 +299,10 @@ textarea {
   padding: 18px;
 }
 
+.card-shell {
+  display: block;
+}
+
 .card h2,
 .card h3 {
   margin: 0 0 14px;
@@ -320,6 +324,29 @@ textarea {
   gap: 10px;
   max-height: 420px;
   overflow: auto;
+}
+
+.list-item.compact {
+  padding: 12px 14px;
+}
+
+.pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.workbench-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.workbench-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .table-shell {
@@ -1153,6 +1180,10 @@ mark.search-hit {
   }
 
   .readiness-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-metrics {
     grid-template-columns: 1fr;
   }
 

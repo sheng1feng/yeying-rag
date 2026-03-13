@@ -12,6 +12,7 @@ from knowledge.api.routes_documents import router as documents_router
 from knowledge.api.routes_kbs import router as kbs_router
 from knowledge.api.routes_memory import router as memory_router
 from knowledge.api.routes_ops import router as ops_router
+from knowledge.api.routes_retrieval import router as retrieval_router
 from knowledge.api.routes_search import router as search_router
 from knowledge.api.routes_tasks import router as tasks_router
 from knowledge.api.routes_warehouse import router as warehouse_router
@@ -50,4 +51,5 @@ app.include_router(tasks_router)
 app.include_router(documents_router)
 app.include_router(memory_router)
 app.include_router(search_router)
+app.include_router(retrieval_router)
 app.include_router(ops_router)

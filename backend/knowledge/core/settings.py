@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     auto_memory_max_short_terms: int = 4
     auto_memory_recent_turn_max_chars: int = 600
     worker_poll_interval_seconds: int = 5
+    worker_run_lease_ttl_seconds: int = 120
     worker_name: str = "knowledge-worker-1"
 
 

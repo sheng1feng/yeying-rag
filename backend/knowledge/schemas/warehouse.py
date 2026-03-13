@@ -23,6 +23,10 @@ class SourceBindingCreateRequest(BaseModel):
     scope_type: Literal["file", "directory"] = "file"
 
 
+class SourceBindingUpdateRequest(BaseModel):
+    enabled: bool
+
+
 class SourceBindingResponse(BaseModel):
     id: int
     kb_id: int
@@ -31,6 +35,15 @@ class SourceBindingResponse(BaseModel):
     scope_type: str
     enabled: bool
     last_imported_at: datetime | None = None
+    sync_status: str | None = None
+    status_reason: str | None = None
+    document_count: int = 0
+    chunk_count: int = 0
+    last_document_indexed_at: datetime | None = None
+    latest_task_id: int | None = None
+    latest_task_status: str | None = None
+    latest_task_finished_at: datetime | None = None
+    active_task_count: int = 0
 
     model_config = {"from_attributes": True}
 

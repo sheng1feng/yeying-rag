@@ -7,4 +7,5 @@ __pycache__/
 *.db
 *.worker.lock
 backend/.env
+.knowledge-task-control/
 .mock_warehouse/

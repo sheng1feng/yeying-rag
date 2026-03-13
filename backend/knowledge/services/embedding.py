@@ -10,16 +10,25 @@ from knowledge.core.settings import get_settings
 
 
 class EmbeddingProvider:
+    provider_name = "unknown"
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_texts([text])[0]
 
+    def diagnostics(self) -> dict:
+        return {"provider_name": self.provider_name}
+
 
 class MockEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, dimensions: int) -> None:
+    provider_name = "mock"
+
+    def __init__(self, dimensions: int, configured_mode: str = "mock", fallback_reason: str = "") -> None:
         self.dimensions = dimensions
+        self.configured_mode = configured_mode
+        self.fallback_reason = fallback_reason
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
@@ -33,9 +42,21 @@ class MockEmbeddingProvider(EmbeddingProvider):
             vectors.append([x / norm for x in raw])
         return vectors
 
+    def diagnostics(self) -> dict:
+        return {
+            "provider_name": self.provider_name,
+            "configured_mode": self.configured_mode,
+            "dimensions": self.dimensions,
+            "fallback_reason": self.fallback_reason,
+        }
+
 
 class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
+    provider_name = "openai_compatible"
+
     def __init__(self, base_url: str, api_key: str, model: str) -> None:
+        self.base_url = base_url
+        self.model = model
         self.client = OpenAIEmbeddings(base_url=base_url, api_key=api_key or "dummy", model=model)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -43,6 +64,15 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
 
     def embed_query(self, text: str) -> list[float]:
         return self.client.embed_query(text)
+
+    def diagnostics(self) -> dict:
+        return {
+            "provider_name": self.provider_name,
+            "configured_mode": self.provider_name,
+            "base_url": self.base_url,
+            "model": self.model,
+            "fallback_reason": "",
+        }
 
 
 class LangChainEmbeddingAdapter(Embeddings):
@@ -64,7 +94,14 @@ def build_embedding_provider() -> EmbeddingProvider:
             api_key=settings.model_gateway_api_key,
             model=settings.embedding_model,
         )
-    return MockEmbeddingProvider(dimensions=settings.embedding_dimensions)
+    fallback_reason = ""
+    if settings.model_provider_mode == "openai_compatible" and not settings.model_gateway_base_url:
+        fallback_reason = "model_gateway_base_url missing; using mock embedding provider"
+    return MockEmbeddingProvider(
+        dimensions=settings.embedding_dimensions,
+        configured_mode=settings.model_provider_mode,
+        fallback_reason=fallback_reason,
+    )
 
 
 def build_langchain_embeddings() -> Embeddings:

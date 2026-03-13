@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from knowledge.core.settings import get_settings
 from knowledge.models import LongTermMemory, MemoryIngestionEvent, ShortTermMemory
+from knowledge.services.conversation import build_memory_session_key, parse_memory_session_key
 from knowledge.utils.time import utc_now
 
 
@@ -22,7 +23,14 @@ class MemoryIngestionService:
     def __init__(self) -> None:
         self.settings = get_settings()
 
-    def list_events(self, db: Session, wallet_address: str, session_id: str | None = None, limit: int = 20) -> list[MemoryIngestionEvent]:
+    def list_events(
+        self,
+        db: Session,
+        wallet_address: str,
+        session_id: str | None = None,
+        trace_id: str | None = None,
+        limit: int = 20,
+    ) -> list[MemoryIngestionEvent]:
         stmt = (
             select(MemoryIngestionEvent)
             .where(MemoryIngestionEvent.owner_wallet_address == wallet_address)
@@ -31,10 +39,13 @@ class MemoryIngestionService:
         )
         if session_id:
             stmt = stmt.where(MemoryIngestionEvent.session_id == session_id)
+        if trace_id:
+            stmt = stmt.where(MemoryIngestionEvent.trace_id == trace_id)
         return list(db.scalars(stmt).all())
 
     def ingest(self, db: Session, wallet_address: str, payload: dict) -> dict:
         session_id = self._clean(payload.get("session_id"))
+        memory_namespace = self._clean(payload.get("memory_namespace"))
         query = self._clean(payload.get("query"))
         answer = self._clean(payload.get("answer"))
         source = self._clean(payload.get("source")) or "bot"
@@ -44,6 +55,7 @@ class MemoryIngestionService:
             raise ValueError("session_id 不能为空")
         if not query:
             raise ValueError("query 不能为空")
+        memory_session_key = build_memory_session_key(session_id=session_id, memory_namespace=memory_namespace)
 
         now = utc_now()
         source_refs = self._dedupe_items(payload.get("source_refs") or [], limit=10)
@@ -60,7 +72,7 @@ class MemoryIngestionService:
             memory = self._create_short_term_if_new(
                 db=db,
                 wallet_address=wallet_address,
-                session_id=session_id,
+                session_id=memory_session_key or session_id,
                 memory_type="recent_turn",
                 content=recent_turn,
                 ttl=now + timedelta(hours=self.settings.auto_memory_short_term_ttl_hours),
@@ -75,7 +87,7 @@ class MemoryIngestionService:
             memory = self._create_short_term_if_new(
                 db=db,
                 wallet_address=wallet_address,
-                session_id=session_id,
+                session_id=memory_session_key or session_id,
                 memory_type="summary",
                 content=refs_summary,
                 ttl=now + timedelta(hours=self.settings.auto_memory_short_term_ttl_hours),
@@ -89,7 +101,7 @@ class MemoryIngestionService:
             memory = self._create_short_term_if_new(
                 db=db,
                 wallet_address=wallet_address,
-                session_id=session_id,
+                session_id=memory_session_key or session_id,
                 memory_type="temporary_fact",
                 content=candidate,
                 ttl=now + timedelta(hours=self.settings.auto_memory_short_term_ttl_hours),
@@ -135,6 +147,7 @@ class MemoryIngestionService:
             notes_json={
                 "skipped_short_term": skipped_short[:6],
                 "skipped_long_term": skipped_long[:6],
+                "memory_namespace": memory_namespace or "",
             },
         )
         db.add(event)
@@ -145,9 +158,10 @@ class MemoryIngestionService:
 
         return {
             "session_id": session_id,
+            "memory_namespace": memory_namespace or None,
             "trace_id": trace_id,
             "source": source,
-            "short_term_created": created_short,
+            "short_term_created": [self._serialize_short_term(memory) for memory in created_short],
             "long_term_created": created_long,
             "skipped_short_term": skipped_short,
             "skipped_long_term": skipped_long,
@@ -263,3 +277,17 @@ class MemoryIngestionService:
             if len(items) >= limit:
                 break
         return items
+
+    @staticmethod
+    def _serialize_short_term(memory: ShortTermMemory) -> dict:
+        memory_namespace, session_id = parse_memory_session_key(memory.session_id)
+        return {
+            "id": memory.id,
+            "owner_wallet_address": memory.owner_wallet_address,
+            "session_id": session_id or "",
+            "memory_namespace": memory_namespace,
+            "memory_type": memory.memory_type,
+            "content": memory.content,
+            "ttl_or_expire_at": memory.ttl_or_expire_at,
+            "created_at": memory.created_at,
+        }

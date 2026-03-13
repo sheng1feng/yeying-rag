@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
+from datetime import timedelta
 import time
-from pathlib import Path
-from urllib.parse import unquote
-import fcntl
 
-from sqlalchemy import select
-from sqlalchemy.engine import make_url
+from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from knowledge.core.settings import get_settings
 from knowledge.db.session import session_scope
@@ -18,17 +15,17 @@ from knowledge.utils.time import utc_now
 
 
 class Worker:
+    RUN_LEASE_NAME = "__knowledge-task-runner__"
+
     def __init__(self) -> None:
         self.settings = get_settings()
         self.ingestion_service = IngestionService()
         self.memory_service = MemoryService()
-        self.lock_file_path = self._resolve_lock_file_path()
 
     def process_once(self) -> int:
-        lock_handle = self._acquire_run_lock()
-        if lock_handle is None:
-            return 0
         processed = 0
+        if not self._acquire_run_lease():
+            return 0
         try:
             with session_scope() as db:
                 self._heartbeat(db, status="running", last_error="")
@@ -41,12 +38,13 @@ class Worker:
                     ).all()
                 )
                 for task in tasks:
+                    self._touch_run_lease(db)
                     self.ingestion_service.process_task(db, task)
                     processed += 1
                 self._heartbeat(db, status="idle", processed_count=processed, last_error="")
             return processed
         finally:
-            self._release_run_lock(lock_handle)
+            self._release_run_lease()
 
     def run_forever(self) -> None:
         while True:
@@ -73,48 +71,64 @@ class Worker:
             record.last_error = last_error
         db.flush()
 
-    def _resolve_lock_file_path(self) -> Path:
-        database = make_url(self.settings.database_url).database or ""
-        if database and database != ":memory:":
-            db_path = Path(unquote(database))
-            if not db_path.is_absolute():
-                db_path = (Path.cwd() / db_path).resolve()
-            return db_path.with_name(f"{db_path.name}.worker.lock")
-        return Path.cwd() / ".knowledge-worker.lock"
+    def _lease_stale_before(self):
+        return utc_now() - timedelta(seconds=max(15, int(self.settings.worker_run_lease_ttl_seconds)))
 
-    def _acquire_run_lock(self):
-        self.lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_file_path.open("a+", encoding="utf-8")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.close()
-            return None
-        handle.seek(0)
-        handle.truncate()
-        handle.write(str(os.getpid()))
-        handle.flush()
-        return handle
+    def _acquire_run_lease(self) -> bool:
+        now = utc_now()
+        stale_before = self._lease_stale_before()
+        with session_scope() as db:
+            result = db.execute(
+                update(WorkerStatus)
+                .where(WorkerStatus.worker_name == self.RUN_LEASE_NAME)
+                .where(or_(WorkerStatus.status != "running", WorkerStatus.last_seen_at < stale_before))
+                .values(status="running", last_seen_at=now, last_error="")
+            )
+            if (result.rowcount or 0) == 1:
+                return True
+            lease = db.get(WorkerStatus, self.RUN_LEASE_NAME)
+            if lease is not None and lease.status == "running" and lease.last_seen_at >= stale_before:
+                return False
+            if lease is None:
+                try:
+                    db.add(WorkerStatus(worker_name=self.RUN_LEASE_NAME, status="running", last_seen_at=now))
+                    db.flush()
+                    return True
+                except IntegrityError:
+                    db.rollback()
+                    return False
+            lease.status = "running"
+            lease.last_seen_at = now
+            lease.last_error = ""
+            db.flush()
+            return True
 
-    @staticmethod
-    def _release_run_lock(handle) -> None:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
+    def _touch_run_lease(self, db) -> None:
+        lease = db.get(WorkerStatus, self.RUN_LEASE_NAME)
+        if lease is None:
+            lease = WorkerStatus(worker_name=self.RUN_LEASE_NAME, status="running", last_seen_at=utc_now())
+            db.add(lease)
+            db.flush()
+            return
+        lease.status = "running"
+        lease.last_seen_at = utc_now()
+        db.flush()
+
+    def _release_run_lease(self) -> None:
+        with session_scope() as db:
+            lease = db.get(WorkerStatus, self.RUN_LEASE_NAME)
+            if lease is None:
+                return
+            lease.status = "idle"
+            lease.last_seen_at = utc_now()
+            db.flush()
 
     def is_run_locked(self) -> bool:
-        self.lock_file_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.lock_file_path.open("a+", encoding="utf-8")
-        try:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            return False
-        finally:
-            handle.close()
+        with session_scope() as db:
+            lease = db.get(WorkerStatus, self.RUN_LEASE_NAME)
+            if lease is None:
+                return False
+            return lease.status == "running" and lease.last_seen_at >= self._lease_stale_before()
 
 
 if __name__ == "__main__":

@@ -18,13 +18,15 @@ from knowledge.models import (
     MemoryIngestionEvent,
     SourceBinding,
 )
-from knowledge.schemas.kb import KBCreateRequest, KBResponse, KBStatsResponse, KBUpdateRequest
+from knowledge.schemas.kb import KBCreateRequest, KBResponse, KBStatsResponse, KBUpdateRequest, KBWorkbenchResponse
+from knowledge.services.bindings import BindingService
 from knowledge.services.ingestion import IngestionService
 
 
 router = APIRouter(prefix="/kbs", tags=["knowledge_bases"])
 settings = get_settings()
 ingestion_service = IngestionService()
+binding_service = BindingService()
 
 
 def _default_kb_config() -> dict:
@@ -201,3 +203,9 @@ def kb_stats(kb_id: int, wallet_address: str = Depends(get_current_wallet), db: 
         latest_task_status=latest_task.status if latest_task else None,
         latest_task_finished_at=latest_task.finished_at if latest_task else None,
     )
+
+
+@router.get("/{kb_id}/workbench", response_model=KBWorkbenchResponse)
+def kb_workbench(kb_id: int, wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> dict:
+    kb = _get_kb_or_404(db, wallet_address, kb_id)
+    return binding_service.build_workbench(db, kb)

@@ -1,10 +1,14 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TaskCreateRequest(BaseModel):
     source_paths: list[str]
+
+
+class BindingTaskCreateRequest(BaseModel):
+    binding_ids: list[int] = Field(default_factory=list)
 
 
 class TaskResponse(BaseModel):

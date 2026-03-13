@@ -34,6 +34,7 @@ class LongTermMemoryResponse(BaseModel):
 
 class ShortTermMemoryCreateRequest(BaseModel):
     session_id: str
+    memory_namespace: str | None = None
     memory_type: Literal["recent_turn", "summary", "temporary_fact", "recent_preference"]
     content: str
     ttl_or_expire_at: datetime | None = None
@@ -43,6 +44,7 @@ class ShortTermMemoryResponse(BaseModel):
     id: int
     owner_wallet_address: str
     session_id: str
+    memory_namespace: str | None = None
     memory_type: str
     content: str
     ttl_or_expire_at: datetime | None = None
@@ -53,6 +55,7 @@ class ShortTermMemoryResponse(BaseModel):
 
 class MemoryIngestionRequest(BaseModel):
     session_id: str
+    memory_namespace: str | None = None
     kb_id: int | None = None
     query: str
     answer: str = ""
@@ -85,6 +88,7 @@ class MemoryIngestionEventResponse(BaseModel):
 
 class MemoryIngestionResponse(BaseModel):
     session_id: str
+    memory_namespace: str | None = None
     trace_id: str
     source: str
     short_term_created: list[ShortTermMemoryResponse]

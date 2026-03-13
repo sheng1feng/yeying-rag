@@ -22,11 +22,13 @@ from knowledge.schemas.warehouse_auth import (
 )
 from knowledge.schemas.warehouse import (
     SourceBindingCreateRequest,
+    SourceBindingUpdateRequest,
     SourceBindingResponse,
     UploadResponse,
     WarehouseBrowseResponse,
     WarehouseEntry,
 )
+from knowledge.services.bindings import BindingService
 from knowledge.services.warehouse import build_warehouse_gateway
 from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
@@ -37,6 +39,7 @@ router = APIRouter(tags=["warehouse_sources"])
 gateway = build_warehouse_gateway()
 warehouse_session_service = WarehouseSessionService()
 parser = DocumentParser()
+binding_service = BindingService()
 
 
 def _require_bound_token_if_needed(db: Session, wallet_address: str) -> str | None:
@@ -386,9 +389,33 @@ def delete_binding(
     return {"ok": True}
 
 
-@router.get("/kbs/{kb_id}/bindings", response_model=list[SourceBindingResponse])
-def list_bindings(kb_id: int, wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> list[SourceBinding]:
+@router.patch("/kbs/{kb_id}/bindings/{binding_id}", response_model=SourceBindingResponse)
+def update_binding(
+    kb_id: int,
+    binding_id: int,
+    payload: SourceBindingUpdateRequest,
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> dict:
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None or kb.owner_wallet_address != wallet_address:
         raise HTTPException(status_code=404, detail="knowledge base not found")
-    return list(db.scalars(select(SourceBinding).where(SourceBinding.kb_id == kb_id)).all())
+    binding = db.get(SourceBinding, binding_id)
+    if binding is None or binding.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail="binding not found")
+    binding.enabled = bool(payload.enabled)
+    db.commit()
+    db.refresh(binding)
+    summaries = binding_service.list_binding_summaries(db, kb)
+    for item in summaries:
+        if int(item["id"]) == binding.id:
+            return item
+    return SourceBindingResponse.model_validate(binding)
+
+
+@router.get("/kbs/{kb_id}/bindings", response_model=list[SourceBindingResponse])
+def list_bindings(kb_id: int, wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> list[dict]:
+    kb = db.get(KnowledgeBase, kb_id)
+    if kb is None or kb.owner_wallet_address != wallet_address:
+        raise HTTPException(status_code=404, detail="knowledge base not found")
+    return binding_service.list_binding_summaries(db, kb)
