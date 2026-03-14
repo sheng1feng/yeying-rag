@@ -11,20 +11,60 @@ from knowledge.db.session import get_db
 from knowledge.models import ImportedChunk, ImportedDocument, ImportTask, KnowledgeBase, LongTermMemory, MemoryIngestionEvent, ShortTermMemory, UploadRecord, WorkerStatus
 from knowledge.core.settings import get_settings
 from knowledge.services.vector_store import build_vector_store
+from knowledge.services.task_queue import TaskQueueService
 from knowledge.utils.time import utc_now
 
 
 router = APIRouter(prefix="/ops", tags=["ops"], dependencies=[Depends(get_current_wallet)])
+task_queue_service = TaskQueueService()
 
 
 @router.get("/overview")
 def overview(db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    stale_before = utc_now() - timedelta(seconds=max(15, int(settings.worker_run_lease_ttl_seconds)))
+    running_tasks = int(
+        db.scalar(select(func.count(ImportTask.id)).where(ImportTask.status.in_(("running", "cancel_requested")))) or 0
+    )
+    stale_claims = int(
+        db.scalar(
+            select(func.count(ImportTask.id))
+            .where(ImportTask.status.in_(("running", "cancel_requested")))
+            .where(
+                (ImportTask.heartbeat_at.is_(None) & (ImportTask.started_at < stale_before))
+                | (ImportTask.heartbeat_at < stale_before)
+            )
+        )
+        or 0
+    )
+    completed_tasks = list(
+        db.scalars(
+            select(ImportTask)
+            .where(ImportTask.finished_at.is_not(None))
+            .order_by(ImportTask.finished_at.desc(), ImportTask.id.desc())
+            .limit(50)
+        ).all()
+    )
+    wait_samples = [
+        max(0, int((task.started_at - task.created_at).total_seconds() * 1000))
+        for task in completed_tasks
+        if task.started_at is not None
+    ]
+    run_samples = [
+        max(0, int((task.finished_at - task.started_at).total_seconds() * 1000))
+        for task in completed_tasks
+        if task.started_at is not None and task.finished_at is not None
+    ]
     return {
         "knowledge_bases": int(db.scalar(select(func.count(KnowledgeBase.id))) or 0),
         "documents": int(db.scalar(select(func.count(ImportedDocument.id))) or 0),
         "chunks": int(db.scalar(select(func.count(ImportedChunk.id))) or 0),
         "tasks_total": int(db.scalar(select(func.count(ImportTask.id))) or 0),
         "tasks_pending": int(db.scalar(select(func.count(ImportTask.id)).where(ImportTask.status == "pending")) or 0),
+        "tasks_running": running_tasks,
+        "tasks_claimed_stale": stale_claims,
+        "avg_task_wait_ms": int(sum(wait_samples) / len(wait_samples)) if wait_samples else 0,
+        "avg_task_run_ms": int(sum(run_samples) / len(run_samples)) if run_samples else 0,
         "long_term_memories": int(db.scalar(select(func.count(LongTermMemory.id))) or 0),
         "short_term_memories": int(db.scalar(select(func.count(ShortTermMemory.id))) or 0),
         "memory_ingestions": int(db.scalar(select(func.count(MemoryIngestionEvent.id))) or 0),
@@ -61,6 +101,8 @@ def stores_health(db: Session = Depends(get_db)) -> dict:
 def workers(db: Session = Depends(get_db)) -> list[dict]:
     rows = list(db.scalars(select(WorkerStatus).order_by(WorkerStatus.worker_name.asc())).all())
     now = utc_now()
+    stale_before = task_queue_service.stale_before()
+    active_by_worker = task_queue_service.active_tasks_by_worker(db, stale_before)
     results = []
     for row in rows:
         stale = row.last_seen_at < now - timedelta(seconds=90)
@@ -72,6 +114,7 @@ def workers(db: Session = Depends(get_db)) -> list[dict]:
                 "last_processed_at": row.last_processed_at,
                 "processed_count": row.processed_count,
                 "last_error": row.last_error,
+                "active_tasks_count": active_by_worker.get(row.worker_name, 0),
             }
         )
     return results

@@ -18,6 +18,7 @@ from knowledge.api.routes_tasks import router as tasks_router
 from knowledge.api.routes_warehouse import router as warehouse_router
 from knowledge.core.settings import get_settings
 from knowledge.db.base import Base
+from knowledge.db.schema import ensure_runtime_schema
 from knowledge.db.session import engine
 from knowledge.services.vector_store import close_vector_store
 
@@ -28,6 +29,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_runtime_schema(engine)
     yield
     close_vector_store()
 

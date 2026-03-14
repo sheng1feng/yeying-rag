@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from knowledge.db.session import engine, session_scope
 from knowledge.main import app
-from knowledge.models import ImportTask, WorkerStatus
+from knowledge.models import ImportTask
 from knowledge.utils.time import utc_now
 from knowledge.workers.runner import Worker
 
@@ -244,7 +244,7 @@ def test_sqlite_engine_uses_busy_timeout_and_wal():
         assert foreign_keys == 1
 
 
-def test_worker_serializes_processing_and_keeps_tasks_queued_when_busy():
+def test_worker_processes_pending_tasks_without_global_run_lease():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
@@ -263,41 +263,17 @@ def test_worker_serializes_processing_and_keeps_tasks_queued_when_busy():
         assert created.json()["queue_state"] == "queued"
         assert created.json()["queue_position"] == 1
 
-        worker = Worker()
-        with session_scope() as db:
-            lease = db.get(WorkerStatus, worker.RUN_LEASE_NAME)
-            if lease is None:
-                lease = WorkerStatus(worker_name=worker.RUN_LEASE_NAME)
-                db.add(lease)
-            lease.status = "running"
-
-        blocked = client.post("/tasks/process-pending", headers=headers)
-        assert blocked.status_code == 200
-        blocked_payload = blocked.json()
-        assert blocked_payload["processed"] == 0
-        assert blocked_payload["pending"] >= 1
-        assert blocked_payload["worker_busy"] is True
-
-        pending_task = client.get(f"/tasks/{task_id}", headers=headers)
-        assert pending_task.status_code == 200
-        assert pending_task.json()["status"] == "pending"
-        assert pending_task.json()["queue_state"] == "queued"
-
-        with session_scope() as db:
-            lease = db.get(WorkerStatus, worker.RUN_LEASE_NAME)
-            assert lease is not None
-            lease.status = "idle"
-
         resumed = client.post("/tasks/process-pending", headers=headers)
         assert resumed.status_code == 200
         assert resumed.json()["processed"] >= 1
-
+        assert resumed.json()["worker_busy"] is False
         finished_task = client.get(f"/tasks/{task_id}", headers=headers)
         assert finished_task.status_code == 200
         assert finished_task.json()["status"] in {"failed", "partial_success", "succeeded"}
+        assert finished_task.json()["claimed_by"] is None
 
 
-def test_worker_ignores_stale_database_run_lease():
+def test_worker_reclaims_stale_running_task_and_reprocesses_it():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
@@ -313,17 +289,23 @@ def test_worker_ignores_stale_database_run_lease():
 
         worker = Worker()
         with session_scope() as db:
-            lease = db.get(WorkerStatus, worker.RUN_LEASE_NAME)
-            if lease is None:
-                lease = WorkerStatus(worker_name=worker.RUN_LEASE_NAME)
-                db.add(lease)
-            lease.status = "running"
-            lease.last_seen_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
+            task = db.get(ImportTask, created.json()["id"])
+            assert task is not None
+            task.status = "running"
+            task.claimed_by = "stale-worker"
+            task.claimed_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
+            task.started_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
+            task.heartbeat_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
+            task.last_stage = "processing:/../stale-lease-not-allowed.txt"
 
         processed = client.post("/tasks/process-pending", headers=headers)
         assert processed.status_code == 200
         assert processed.json()["processed"] >= 1
         assert processed.json()["worker_busy"] is False
+        task_after = client.get(f"/tasks/{created.json()['id']}", headers=headers)
+        assert task_after.status_code == 200
+        assert task_after.json()["status"] in {"failed", "partial_success", "succeeded"}
+        assert task_after.json()["claimed_by"] is None
 
 
 def test_cancel_pending_task_marks_canceled_without_processing():
@@ -1440,6 +1422,12 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
         assert reindex_payload["source_paths"] == [upload_a.json()["warehouse_path"]]
 
         delete_task = client.post(f"/kbs/{kb_id}/tasks/delete-from-bindings", headers=headers, json={})
+        assert delete_task.status_code == 409
+
+        processed_reindex = client.post("/tasks/process-pending", headers=headers)
+        assert processed_reindex.status_code == 200
+
+        delete_task = client.post(f"/kbs/{kb_id}/tasks/delete-from-bindings", headers=headers, json={})
         assert delete_task.status_code == 200
         assert delete_task.json()["task_type"] == "delete"
 
@@ -1449,6 +1437,33 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
         documents_after_delete = client.get(f"/kbs/{kb_id}/documents", headers=headers)
         assert documents_after_delete.status_code == 200
         assert documents_after_delete.json() == []
+
+
+def test_duplicate_active_task_reuses_existing_task():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        kb = client.post("/kbs", headers=headers, json={"name": "Duplicate Task KB", "description": "duplicate"}).json()
+        kb_id = kb["id"]
+
+        created = client.post(
+            f"/kbs/{kb_id}/tasks/import",
+            headers=headers,
+            json={"source_paths": ["/personal/dup", "/personal/dup/file.txt"]},
+        )
+        assert created.status_code == 200
+        created_payload = created.json()
+        assert created_payload["source_paths"] == ["/personal/dup"]
+
+        duplicate = client.post(
+            f"/kbs/{kb_id}/tasks/import",
+            headers=headers,
+            json={"source_paths": ["/personal/dup"]},
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["id"] == created_payload["id"]
 
 
 def test_binding_based_task_endpoints_validate_requested_binding_ids():

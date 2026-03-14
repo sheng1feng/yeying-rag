@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     auto_memory_recent_turn_max_chars: int = 600
     worker_poll_interval_seconds: int = 5
     worker_run_lease_ttl_seconds: int = 120
+    worker_task_concurrency: int = 2
+    worker_max_active_tasks_per_user: int = 1
+    worker_task_heartbeat_interval_seconds: int = 15
     worker_name: str = "knowledge-worker-1"
 
 

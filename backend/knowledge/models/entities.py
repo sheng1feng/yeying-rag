@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from knowledge.db.base import Base
@@ -124,6 +124,10 @@ class EmbeddingRecord(Base):
 
 class ImportTask(Base):
     __tablename__ = "import_tasks"
+    __table_args__ = (
+        Index("ix_import_tasks_status_created_at", "status", "created_at"),
+        Index("ix_import_tasks_owner_status_created_at", "owner_wallet_address", "status", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_wallet_address: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
@@ -136,6 +140,11 @@ class ImportTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    attempt: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_stage: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
 
 class ImportTaskItem(Base):
@@ -149,6 +158,9 @@ class ImportTaskItem(Base):
     message: Mapped[str] = mapped_column(Text, default="", nullable=False)
     processed_chunks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     source_version: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    stage: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
