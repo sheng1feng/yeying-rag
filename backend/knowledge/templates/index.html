@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>knowledge console</title>
+    <link rel="stylesheet" href="/static/css/console.css" />
+  </head>
+  <body>
+    <div id="app-root" class="layout">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-title">knowledge</div>
+          <div class="brand-subtitle">钱包知识库管理台</div>
+        </div>
+
+        <div class="wallet-card">
+          <p><strong>knowledge 登录</strong></p>
+          <div class="wallet-summary">
+            <p id="login-status" class="muted">未登录</p>
+            <div id="wallet-address" class="wallet-address" title="">未连接钱包</div>
+          </div>
+          <div class="sidebar-actions">
+            <button id="connect-wallet">钱包登录</button>
+            <button id="logout-button" class="secondary">退出</button>
+          </div>
+        </div>
+
+        <div class="nav-card">
+          <p><strong>导航</strong></p>
+          <div class="nav-list">
+            <button class="nav-item active" data-view-target="dashboard">概览</button>
+            <button class="nav-item" data-view-target="kbs">知识库</button>
+            <button class="nav-item" data-view-target="warehouse">资产仓库</button>
+            <button class="nav-item" data-view-target="tasks">导入任务</button>
+            <button class="nav-item" data-view-target="documents">文档与切片</button>
+            <button class="nav-item" data-view-target="memory">记忆</button>
+            <button class="nav-item" data-view-target="retrieval">检索与上下文</button>
+            <button class="nav-item" data-view-target="ops">运维状态</button>
+            <button class="nav-item" data-view-target="guides">接入指引</button>
+          </div>
+        </div>
+
+        <div class="nav-card">
+          <p><strong>当前选中知识库</strong></p>
+          <p id="selected-kb-name">未选择</p>
+          <p id="selected-kb-desc" class="muted">请选择一个知识库后继续导入和检索。</p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <section class="topbar">
+          <div>
+            <h1>knowledge 管理控制台</h1>
+            <div class="topbar-meta">前台优先版，围绕真实 `warehouse` 资产浏览、上传、导入、记忆与检索做联调测试。</div>
+          </div>
+          <div class="toolbar">
+            <button class="secondary" id="jump-dashboard">概览</button>
+            <button class="secondary" id="jump-warehouse">资产仓库</button>
+            <button class="secondary" id="jump-retrieval">检索</button>
+          </div>
+          <div class="status-pills">
+            <span class="pill" id="pill-wallet">钱包：未登录</span>
+            <span class="pill" id="pill-kb">知识库：0</span>
+            <span class="pill" id="pill-task">任务：0</span>
+          </div>
+        </section>
+
+        <section class="view active" data-view="dashboard">
+          <div class="summary-grid">
+            <div class="card">
+              <div class="metric-value" id="metric-kbs">0</div>
+              <div class="metric-label">知识库数量</div>
+            </div>
+            <div class="card">
+              <div class="metric-value" id="metric-bindings">0</div>
+              <div class="metric-label">当前知识库绑定源</div>
+            </div>
+            <div class="card">
+              <div class="metric-value" id="metric-docs">0</div>
+              <div class="metric-label">当前知识库文档数</div>
+            </div>
+            <div class="card">
+              <div class="metric-value" id="metric-tasks">0</div>
+              <div class="metric-label">任务总数</div>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>最近活动</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="dashboard-refresh-all">刷新全部</button>
+                </div>
+              </div>
+              <div class="helper">聚合最近上传、任务执行和当前知识库文档索引，方便按真实数据流转顺序做联调。</div>
+              <div id="recent-activity" class="empty">暂无最近活动，先上传或导入一个文件。</div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>当前知识库统计</h2>
+              </div>
+              <div id="current-kb-stats" class="empty">请选择知识库后查看统计。</div>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>知识库功能总览</h2>
+              </div>
+              <div class="feature-grid">
+                <div class="feature-item">
+                  <div class="feature-title">1. 资产接入</div>
+                  <div class="feature-text">自动连接 `warehouse`，支持浏览 `personal` / `apps`，并将个人上传仍然落到资产仓库。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">2. 索引建库</div>
+                  <div class="feature-text">按文件类型切块，生成 embedding，写入向量库，并维护导入任务明细与重试能力。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">3. 记忆管理</div>
+                  <div class="feature-text">支持长期记忆与短期记忆管理，并可在检索/对话后自动沉淀关键上下文。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">4. 检索供给</div>
+                  <div class="feature-text">为 bot / chat 提供检索结果和 retrieval-context，而不是直接替代对话服务。</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>产品工作流</h2>
+              </div>
+              <div class="workflow-steps">
+                <div class="workflow-step"><strong>Step 1</strong><span>钱包登录</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>浏览 / 上传资产</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>绑定到知识库</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>导入并切块索引</span></div>
+                <div class="workflow-step"><strong>Step 5</strong><span>检索 / 记忆 / 上下文供给</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>系统就绪状态</h2>
+            </div>
+            <div id="system-readiness" class="empty">尚未加载系统就绪状态。</div>
+          </div>
+
+          <div class="card">
+              <div class="section-header">
+                <h2>系统输出</h2>
+              </div>
+              <div id="output" class="code"></div>
+          </div>
+        </section>
+
+        <section class="view" data-view="kbs">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>我的知识库</h2>
+                <div class="toolbar">
+                  <button id="open-create-kb">新建知识库</button>
+                  <button class="secondary" id="refresh-kbs">刷新</button>
+                </div>
+              </div>
+              <div class="list" id="kb-list"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>知识库操作</h2>
+              </div>
+              <div class="hint-box">
+                知识库的创建和编辑都改为抽屉式操作。先从左侧选中知识库，再点击“编辑当前知识库”。
+              </div>
+              <div class="toolbar">
+                <button id="open-edit-kb" class="secondary">编辑当前知识库</button>
+                <button id="delete-kb" class="danger">删除当前知识库</button>
+              </div>
+              <div class="helper">当前知识库的基础信息会同步显示在左侧栏和顶部状态区域。</div>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>当前知识库绑定源</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="refresh-bindings">刷新</button>
+                </div>
+              </div>
+              <div class="inline-form">
+                <div class="path-input-wrap">
+                  <input id="binding-path" data-path-field="binding-path" placeholder="例如 /personal/uploads/a.txt 或 /apps/your.app/" />
+                </div>
+                <button id="add-binding">绑定</button>
+              </div>
+              <div class="helper">只允许绑定 `personal` 或 `apps/<appId>` 下的路径。点击输入框可直接从当前仓库目录选择。</div>
+              <div class="list" id="binding-list"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>知识库工作台</h2>
+              </div>
+              <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="warehouse">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>浏览 warehouse</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="browse-personal-root">个人资产</button>
+                  <button class="secondary" id="browse-apps-root">应用资产</button>
+                </div>
+              </div>
+              <div class="inline-form">
+                <div class="path-input-wrap">
+                  <input id="browse-path" data-path-field="browse-path" value="/personal" />
+                </div>
+                <button id="browse-warehouse">浏览</button>
+              </div>
+              <div class="inline-form" style="margin-top: 10px">
+                <input id="warehouse-filter" placeholder="按名称或路径筛选当前目录" />
+                <button class="secondary" id="clear-warehouse-filter">清空</button>
+              </div>
+              <div id="warehouse-breadcrumbs" class="breadcrumbs"></div>
+              <div class="helper">当前浏览路径：<span id="current-browse-path">/personal</span></div>
+              <div class="table-shell">
+                <div class="table-header warehouse-table">
+                  <div>名称</div>
+                  <div>类型</div>
+                  <div>大小</div>
+                  <div>修改时间</div>
+                  <div>操作</div>
+                </div>
+                <div class="table-body" id="warehouse-list"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>资产详情 / 上传</h2>
+              </div>
+              <div class="form-grid">
+                <div class="path-input-wrap">
+                  <input id="target-dir" data-path-field="target-dir" value="/personal/uploads" />
+                </div>
+                <input id="upload-file" type="file" />
+                <div class="toolbar">
+                  <button id="upload-personal">上传到 personal</button>
+                  <button class="secondary" id="refresh-uploads">刷新上传记录</button>
+                </div>
+              </div>
+              <div class="helper">首版只允许上传到 `warehouse personal`，上传成功后可立即导入知识库。</div>
+              <hr />
+              <div id="warehouse-preview" class="empty">点击左侧文件可查看预览，点击目录可进入。</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>最近上传</h2>
+            </div>
+            <div class="list" id="upload-list"></div>
+          </div>
+        </section>
+
+        <section class="view" data-view="tasks">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>创建导入任务</h2>
+              </div>
+	              <div class="form-grid">
+	                <input id="task-kb-id" placeholder="目标知识库 ID" />
+	                <div class="path-input-wrap">
+	                  <input id="task-source-path" data-path-field="task-source-path" placeholder="源路径，例如 /personal/uploads/a.txt" />
+	                </div>
+	                <div class="toolbar">
+	                  <button id="create-import-task">创建导入任务</button>
+	                  <button id="create-reindex-task" class="secondary">创建重建任务</button>
+	                  <button id="create-delete-task" class="danger">创建删除任务</button>
+	                </div>
+	              </div>
+	              <div class="helper">如果当前知识库已经配置好绑定源，推荐直接使用下面的“按绑定源创建任务”，避免继续手填路径。</div>
+	              <div class="toolbar">
+	                <button id="create-import-from-bindings" class="secondary">导入全部绑定源</button>
+	                <button id="create-reindex-from-bindings" class="secondary">重建全部绑定源</button>
+	                <button id="create-delete-from-bindings" class="danger">删除全部绑定源索引</button>
+	              </div>
+	            </div>
+            <div class="card">
+              <div class="section-header">
+                <h2>任务执行</h2>
+              </div>
+              <div class="inline-form">
+                <select id="task-status-filter">
+                  <option value="">全部状态</option>
+                  <option value="pending">pending</option>
+                  <option value="running">running</option>
+                  <option value="cancel_requested">cancel_requested</option>
+                  <option value="canceled">canceled</option>
+                  <option value="succeeded">succeeded</option>
+                  <option value="partial_success">partial_success</option>
+                  <option value="failed">failed</option>
+                </select>
+                <button class="secondary" id="clear-task-filter">清空</button>
+              </div>
+              <div class="toolbar">
+                <button class="secondary" id="refresh-tasks">刷新任务</button>
+                <button id="process-pending-tasks">处理待执行任务</button>
+              </div>
+              <div class="helper">为了便于前台联调，当前管理台支持手动触发一次 worker 处理待执行任务。</div>
+              <hr />
+              <div id="task-detail" class="empty">点击任务列表中的“查看详情”查看 task item 明细。</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>任务列表</h2>
+            </div>
+            <div class="table-shell">
+              <div class="table-header task-table">
+                <div>ID</div>
+                <div>类型</div>
+                <div>状态</div>
+                <div>源路径</div>
+                <div>更新时间</div>
+                <div>操作</div>
+              </div>
+              <div class="table-body" id="task-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="documents">
+          <div class="card">
+            <div class="section-header">
+              <h2>文档列表</h2>
+              <div class="toolbar">
+                <button class="secondary" id="refresh-documents">刷新</button>
+              </div>
+            </div>
+            <div class="inline-form">
+              <input id="document-filter" placeholder="按文件名、路径、类型筛选文档" />
+              <button class="secondary" id="clear-document-filter">清空</button>
+            </div>
+            <div class="helper">默认查看当前选中知识库的文档。点击“查看详情”后会从右侧滑出文档详情与切片面板。</div>
+            <div class="table-shell table-shell-scroll">
+              <div class="table-header document-table">
+                <div>名称</div>
+                <div>类型</div>
+                <div>来源</div>
+                <div>Chunk</div>
+                <div>更新时间</div>
+                <div>操作</div>
+              </div>
+              <div class="table-body" id="document-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="memory">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>长期记忆</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="refresh-long-memory">刷新</button>
+                </div>
+              </div>
+              <div class="form-grid">
+                <input id="memory-kb-id" placeholder="知识库 ID（可为空）" />
+                <input id="memory-category" value="general" placeholder="category" />
+                <textarea id="memory-content" placeholder="长期记忆内容"></textarea>
+                <div class="toolbar">
+                  <button id="save-memory">写入长期记忆</button>
+                </div>
+              </div>
+              <div class="list" id="long-memory-list"></div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>短期记忆</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="refresh-short-memory">刷新</button>
+                </div>
+              </div>
+              <div class="form-grid">
+                <input id="short-session-id" placeholder="session_id" value="demo-session" />
+                <input id="short-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
+                <select id="short-memory-type">
+                  <option value="recent_turn">recent_turn</option>
+                  <option value="summary">summary</option>
+                  <option value="temporary_fact">temporary_fact</option>
+                  <option value="recent_preference">recent_preference</option>
+                </select>
+                <textarea id="short-memory-content" placeholder="短期记忆内容"></textarea>
+                <div class="toolbar">
+                  <button id="save-short-memory">写入短期记忆</button>
+                </div>
+              </div>
+              <div class="list" id="short-memory-list"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>自动沉淀记录</h2>
+              <div class="toolbar">
+                <button class="secondary" id="refresh-memory-ingestions">刷新</button>
+              </div>
+            </div>
+            <div class="helper">记录 bot / chat 的自动记忆沉淀结果，以及控制台对记忆的删除操作。</div>
+            <div class="list" id="memory-ingestion-list"></div>
+          </div>
+        </section>
+
+        <section class="view" data-view="retrieval">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>知识库检索</h2>
+              </div>
+              <div class="form-grid">
+                <input id="search-kb-id" placeholder="检索知识库 ID" />
+                <input id="search-query" placeholder="请输入检索 query" />
+                <div class="toolbar">
+                  <button id="search-kb">检索</button>
+                </div>
+              </div>
+              <div class="table-shell">
+                <div class="table-header search-table">
+                  <div>排名</div>
+                  <div>来源</div>
+                  <div>相似度</div>
+                  <div>片段内容</div>
+                  <div>操作</div>
+                </div>
+                <div class="table-body" id="search-results"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>Retrieval Context</h2>
+              </div>
+              <div class="form-grid">
+                <input id="context-session-id" value="demo-session" placeholder="session_id" />
+                <input id="context-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
+                <input id="context-kb-ids" placeholder="知识库 ID，多个用逗号分隔" />
+                <input id="context-query" placeholder="query" />
+                <textarea id="context-answer" placeholder="可选：贴入 bot / assistant 最终回答，用于自动沉淀长期/短期记忆"></textarea>
+                <div class="toolbar">
+                  <button id="build-context">生成上下文</button>
+                  <button class="secondary" id="ingest-memory-context">沉淀本轮记忆</button>
+                </div>
+              </div>
+              <div class="helper">推荐流程：先生成上下文，再将最终回答贴入上方输入框，点击“沉淀本轮记忆”。若同一钱包下要验证多个机器人隔离，请给不同机器人填写不同的 `memory_namespace`。</div>
+              <div id="context-results" class="code"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="ops">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>运行概览</h2>
+                <div class="toolbar">
+                  <button class="secondary" id="refresh-ops">刷新</button>
+                </div>
+              </div>
+              <div id="ops-overview" class="empty">尚未加载运维状态。</div>
+            </div>
+            <div class="card">
+              <div class="section-header">
+                <h2>存储与模型健康</h2>
+              </div>
+              <div id="ops-stores" class="empty">尚未加载健康状态。</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>Worker 状态</h2>
+            </div>
+            <div class="list" id="ops-workers"></div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>最近失败任务</h2>
+            </div>
+            <div class="list" id="ops-failures"></div>
+          </div>
+        </section>
+
+        <section class="view" data-view="guides">
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>API 接入文档</h2>
+              </div>
+              <div class="workflow-steps">
+                <div class="workflow-step"><strong>Step 1</strong><span>钱包 challenge / verify 登录 `knowledge`，获取 `knowledge JWT`。</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>按需调用 `/kbs/{kb_id}/search` 或 `/retrieval-context` 获取知识块。</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>bot / chat 生成最终回答后，调用 `/memory/ingest` 自动沉淀记忆。</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>后续会话继续复用 `retrieval-context`，系统会同时返回长短期记忆块。</span></div>
+              </div>
+              <div class="helper">交互式 OpenAPI：`/docs`。仓库文档：`docs/api-integration.md`。</div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>核心接口</h2>
+              </div>
+              <div class="feature-grid">
+                <div class="feature-item">
+                  <div class="feature-title">登录</div>
+                  <div class="feature-text">`POST /auth/challenge` → `POST /auth/verify`</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">检索</div>
+                  <div class="feature-text">`POST /kbs/{kb_id}/search`、`POST /retrieval-context`</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">自动记忆沉淀</div>
+                  <div class="feature-text">`POST /memory/ingest`、`GET /memory/ingestions`</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">知识库管理</div>
+                  <div class="feature-text">`/kbs`、`/tasks`、`/warehouse/*`、`/memory/*`</div>
+                </div>
+              </div>
+              <div class="code">POST /memory/ingest
+{
+  "session_id": "chat-session-1",
+  "kb_id": 1,
+  "query": "用户希望以后回答更简洁",
+  "answer": "好的，后续我会保持简洁回答。",
+  "source": "bot",
+  "trace_id": "trace-demo",
+  "source_refs": ["/personal/uploads/profile.txt"]
+}</div>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="card">
+              <div class="section-header">
+                <h2>产品操作手册</h2>
+              </div>
+              <div class="workflow-steps">
+                <div class="workflow-step"><strong>1</strong><span>登录钱包后，系统自动尝试绑定 `warehouse personal`。</span></div>
+                <div class="workflow-step"><strong>2</strong><span>在“资产仓库”中浏览或上传文件，再绑定到目标知识库。</span></div>
+                <div class="workflow-step"><strong>3</strong><span>在“导入任务”中创建导入/重建/删除任务并跟踪任务明细。</span></div>
+                <div class="workflow-step"><strong>4</strong><span>在“文档与切片”中核验 chunk，在“检索与上下文”中验证命中效果。</span></div>
+                <div class="workflow-step"><strong>5</strong><span>在“记忆”中查看自动沉淀记录，并按需手工补充或删除记忆。</span></div>
+              </div>
+              <div class="helper">完整手册见 `docs/console-operations.md`。</div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>交付保障</h2>
+              </div>
+              <div class="feature-grid">
+                <div class="feature-item">
+                  <div class="feature-title">只读资产中心</div>
+                  <div class="feature-text">knowledge 只消费 `warehouse` 资产，不回写知识处理结果。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">任务治理</div>
+                  <div class="feature-text">提供任务状态、task item 明细、失败重试与最近失败摘要。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">运维可见性</div>
+                  <div class="feature-text">暴露 worker、向量库、模型网关与系统就绪状态。</div>
+                </div>
+                <div class="feature-item">
+                  <div class="feature-title">记忆可追踪</div>
+                  <div class="feature-text">自动沉淀事件可回查，便于验证 bot/chat 是否正确回写上下文。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <div id="confirm-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <h3 id="confirm-title">请确认</h3>
+        <p id="confirm-message" class="muted"></p>
+        <div class="toolbar">
+          <button id="confirm-cancel" class="secondary">取消</button>
+          <button id="confirm-ok" class="danger">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="detail-drawer" class="drawer">
+      <div class="drawer-panel">
+        <div class="section-header">
+          <h2 id="drawer-title">详情</h2>
+          <button id="drawer-close" class="secondary">关闭</button>
+        </div>
+        <div id="drawer-content" class="code"></div>
+      </div>
+    </div>
+
+    <div id="kb-editor-drawer" class="drawer">
+      <div class="drawer-panel kb-editor-panel">
+        <div class="section-header">
+          <div>
+            <h2 id="kb-editor-title">知识库编辑</h2>
+            <div id="kb-editor-subtitle" class="helper">在这里创建或编辑知识库配置。</div>
+          </div>
+          <button id="kb-editor-close" class="secondary">关闭</button>
+        </div>
+        <div class="form-grid">
+          <input id="kb-name" placeholder="知识库名称" />
+          <textarea id="kb-desc" placeholder="知识库描述"></textarea>
+          <div class="grid-2">
+            <input id="kb-chunk-size" type="number" placeholder="chunk size" />
+            <input id="kb-chunk-overlap" type="number" placeholder="chunk overlap" />
+          </div>
+          <div class="grid-2">
+            <input id="kb-retrieval-top-k" type="number" placeholder="retrieval top_k" />
+            <input id="kb-memory-top-k" type="number" placeholder="memory top_k" />
+          </div>
+          <input id="kb-embedding-model" placeholder="embedding 模型名" />
+          <div class="toolbar">
+            <button id="create-kb">创建知识库</button>
+            <button id="update-kb" class="secondary">更新当前知识库</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="document-drawer" class="drawer">
+      <div class="drawer-panel document-drawer-panel">
+        <div class="section-header">
+          <div>
+            <h2 id="document-drawer-title">文档详情 / 切片</h2>
+            <div id="document-drawer-subtitle" class="helper">点击左侧文档后，这里会展示切片与 metadata。</div>
+          </div>
+          <button id="document-drawer-close" class="secondary">关闭</button>
+        </div>
+        <div id="document-detail" class="empty">请选择左侧文档查看切片内容。</div>
+      </div>
+    </div>
+
+    <div id="path-picker-menu" class="path-picker-menu hidden">
+      <div class="path-picker-panel">
+        <div class="path-picker-header">
+          <div>
+            <div class="path-picker-title">选择目录或文件</div>
+            <div id="path-picker-context" class="path-picker-helper">从当前浏览目录、最近上传记录和已绑定路径中选择。</div>
+          </div>
+          <button id="path-picker-close" class="secondary">关闭</button>
+        </div>
+        <div id="path-picker-mode" class="path-picker-mode"></div>
+        <input id="path-picker-filter" placeholder="筛选候选路径" />
+        <div class="path-picker-helper">点击路径后会自动填入当前输入框；浏览路径字段会立即切换目录。</div>
+        <div id="path-picker-sections"></div>
+      </div>
+    </div>
+
+    <script src="/static/js/kb_workbench.js"></script>
+    <script src="/static/js/tasks_panel.js"></script>
+    <script src="/static/js/app.js"></script>
+  </body>
+  </html>

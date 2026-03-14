@@ -1,57 +1,127 @@
-# yeying-知识库（RAG-中台）
+# knowledge
 
-面向业务租户的知识库与检索增强（RAG）中台，提供多租户隔离、知识库配置、向量化管理、记忆服务、工作流编排与插件化扩展，并配套可视化控制台。
+钱包知识库服务，围绕 `warehouse` 作为唯一资产中心构建索引、检索、记忆与 bot 可消费上下文。
 
-**文档更新时间**：2026-02-02
+## 当前实现范围
 
----
+- 钱包 challenge/verify 登录，签发 `knowledge JWT`
+- 多知识库 CRUD + 基础统计
+- `knowledge` 代理浏览 `warehouse` 资产
+- `knowledge` 上传文件到 `warehouse personal`
+- 手动导入 / 重建 / 删除的轻量异步任务
+- 按知识库绑定源批量创建导入 / 重建 / 删除任务
+- 绑定源状态管理（启用/停用、同步状态、最近任务、索引覆盖摘要）
+- 导入治理：任务明细、重试、未变更跳过
+- 运维能力：worker 心跳、数据库租约协调、运行概览、存储健康检查
+- 文档解析、按文件类型 chunk、embedding、索引
+- 长期记忆与短期记忆 CRUD
+- 检索与 retrieval-context API
+- 分层 retrieval APIs 与统一 context 调用入口
+- 产品化前台管理台
+- 知识库工作台视图
 
-## 核心能力
+## 目录
 
-- 多租户隔离：应用（`app_id`）与业务用户（`data_wallet_id`）双层隔离
-- 知识库类型：公共知识库（`public_kb`）与用户私有数据库（`user_upload`）
-- Schema + 向量字段：超级管理员可配置字段与向量化字段
-- 记忆服务：会话记忆写入、检索与删除
-- 摄取作业：作业化摄取与执行记录
-- 工作流编排：Intent + Workflow 配置与执行
-- 插件化扩展：`config.yaml` / `intents.yaml` / `workflows.yaml` / `pipeline.py` / `prompts`
-- 审计日志：数据库配置与私有库变更可追踪
+- `backend/knowledge`: FastAPI 应用
+- `tests`: 后端测试
+- `docs/api-integration.md`: 外部服务 API 接入文档
+- `docs/console-operations.md`: 控制台操作手册
+- `docs/prd-bot-knowledge.md`: bot/chat 产品重构 PRD
+- `docs/technical-design-m1-m2.md`: M1 / M2 技术方案
 
----
+## 运行
 
-## 快速启动
-
-1) 安装依赖
-```bash
-pip install -r backend/requirements.txt
-```
-
-2) 启动后端（自动挂载前端控制台）
 ```bash
 cd backend
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn knowledge.main:app --reload
 ```
 
-3) 打开控制台
-- 登录页：`/console/login.html`
-- 总览：`/console/index.html`
-- 应用控制台：`/console/app.html?app_id=<app_id>`
+默认打开：
 
----
+- API: `http://127.0.0.1:8000`
+- 控制台: `http://127.0.0.1:8000/`
+- OpenAPI: `http://127.0.0.1:8000/docs`
 
-## 文档索引（SDD）
+## Worker
 
-- `docs/product-baseline.md`：SDD-01 产品与范围
-- `docs/system-architecture.md`：SDD-02 系统架构与核心概念
-- `docs/backend-kb-ingestion.md`：SDD-03 数据入库与向量化
-- `docs/backend-kb-metadata.md`：SDD-03A 元数据规范
-- `docs/backend-ingestion-jobs.md`：SDD-04 摄取作业与调度
-- `docs/backend-ingestion-parsers.md`：SDD-04A 摄取解析器
-- `docs/interviewer-collaboration.md`：SDD-05 插件设计与协作
-- `docs/backend-dev-guide.md`：SDD-06 后端开发与扩展
-- `docs/backend-manual.md`：SDD-07 后端部署与运行
-- `docs/frontend-manual.md`：SDD-08 前端控制台使用手册
-- `docs/ops-manual.md`：SDD-09 运维与监控
-- `docs/integration.md`：SDD-10 业务接入指南
-- `backend/docs/api.md`：SDD-11 API 参考（概览）
-- `openapi.yaml`：API 文档源（OpenAPI 3.0.3）
+```bash
+cd backend
+source .venv/bin/activate
+python -m knowledge.workers.runner
+```
+
+## 本地开发默认值
+
+为了方便本地开发，默认配置并不强依赖真实的 `warehouse`、`Weaviate` 或模型网关：
+
+- `warehouse` 默认走 `mock` 模式，本地目录模拟用户资产
+- 向量检索默认走 `db` 模式，在数据库中保存向量并做 Python 侧相似度计算
+- embedding 默认走 `mock` 模式，使用确定性伪向量
+
+生产环境可切换为：
+
+- `WAREHOUSE_GATEWAY_MODE=bound_token`
+- `VECTOR_STORE_MODE=weaviate`
+- `MODEL_PROVIDER_MODE=openai_compatible`
+
+当前测试与验证口径：
+
+- 已覆盖 `db` / `weaviate` 在过滤语义上的一致性验证
+- 已覆盖 `mock` / `openai_compatible` embedding provider 的调用契约验证
+- 不把不同向量后端的相似度分值或排序完全一致作为当前版本保证
+
+## 关键环境变量
+
+- `DATABASE_URL`
+- `JWT_SECRET`
+- `WAREHOUSE_GATEWAY_MODE`
+- `WAREHOUSE_BASE_URL`
+- `WAREHOUSE_WEBDAV_PREFIX`
+- `WAREHOUSE_SERVICE_BEARER`
+- `WAREHOUSE_FORWARD_WALLET_HEADER`
+- `WAREHOUSE_MOCK_ROOT`
+- `VECTOR_STORE_MODE`
+- `WEAVIATE_URL`
+- `MODEL_PROVIDER_MODE`
+- `MODEL_GATEWAY_BASE_URL`
+- `MODEL_GATEWAY_API_KEY`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_DIMENSIONS`
+- `RERANK_ENABLED`
+- `RERANK_MODEL`
+- `RERANK_API_BASE`
+- `RERANK_API_KEY`
+- `WORKER_NAME`
+- `WORKER_RUN_LEASE_TTL_SECONDS`
+
+## `warehouse` 代理约定
+
+当前代码支持两种资产网关：
+
+1. `mock`：本地目录模拟用户资产空间，便于开发测试
+2. `bound_token`：用户先在 `knowledge` 中绑定自己的 `warehouse` 访问凭证，后端加密保存后代理访问上游
+
+线上 `warehouse` 当前采用钱包 challenge/verify 登录，`knowledge` 的绑定流程为：
+
+1. 用户先登录 `knowledge`
+2. `knowledge` 前台自动尝试为当前钱包建立 `warehouse personal` 访问
+3. 前端再次使用钱包对 `warehouse` challenge 签名
+4. `knowledge` 后端调用 `warehouse /auth/verify`，拿到 access token + refresh cookie
+5. `knowledge` 后端加密保存上述凭证，后续浏览 / 上传 / 导入时自动使用
+
+当前默认线上配置：
+
+- `WAREHOUSE_BASE_URL=https://webdav.yeying.pub`
+- `WAREHOUSE_WEBDAV_PREFIX=/dav`
+
+该模式不要求修改 `warehouse` 代码。
+
+## 文档
+
+- 外部服务接入：`docs/api-integration.md`
+- 控制台操作手册：`docs/console-operations.md`
+- 产品重构 PRD：`docs/prd-bot-knowledge.md`
+- M1 / M2 技术方案：`docs/technical-design-m1-m2.md`
