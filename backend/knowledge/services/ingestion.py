@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from time import perf_counter
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -58,6 +58,7 @@ class IngestionService:
             task.error_message = "canceled by user"
             task.started_at = task.started_at or utc_now()
             task.finished_at = utc_now()
+            task.last_stage = "canceled"
             task.stats_json = {
                 **(task.stats_json or {}),
                 "canceled": True,
@@ -65,9 +66,12 @@ class IngestionService:
             }
             db.commit()
             return task
-        task.status = "running"
-        task.started_at = utc_now()
+        if task.status != "running":
+            task.status = "running"
+        task.started_at = task.started_at or utc_now()
+        task.heartbeat_at = utc_now()
         task.error_message = ""
+        task.last_stage = "started"
         db.commit()
 
         processed_files = 0
@@ -75,14 +79,21 @@ class IngestionService:
         failed_files = 0
         skipped_files = 0
         deleted_files = 0
+        unversioned_files = 0
         rollback_plan: dict[str, dict] = {}
         try:
             self._raise_if_cancel_requested(db, task, rollback_plan)
             if task.task_type == "delete":
+                task.last_stage = "deleting"
+                task.heartbeat_at = utc_now()
+                db.commit()
                 deleted_files = self._handle_delete(db, task, rollback_plan)
             else:
                 for source_path in task.source_paths:
                     self._raise_if_cancel_requested(db, task, rollback_plan)
+                    task.last_stage = f"listing:{source_path}"
+                    task.heartbeat_at = utc_now()
+                    db.commit()
                     try:
                         entries = self._iter_files(db, task.owner_wallet_address, source_path)
                     except Exception as exc:  # noqa: BLE001
@@ -96,18 +107,30 @@ class IngestionService:
                             message=str(exc),
                             processed_chunks=0,
                             source_version="",
+                            stage="listing",
+                            error_type=type(exc).__name__,
                         )
                         task.error_message = f"{task.error_message}\n{source_path}: {exc}".strip()
+                        db.commit()
                         continue
                     for file_entry in entries:
                         self._raise_if_cancel_requested(db, task, rollback_plan)
                         processed_files += 1
+                        file_started = perf_counter()
+                        task.last_stage = f"processing:{file_entry.path}"
+                        task.heartbeat_at = utc_now()
+                        db.commit()
                         try:
-                            chunks_created, item_status = self._index_file(db, task, file_entry, rollback_plan)
+                            with db.begin_nested():
+                                chunks_created, item_status, used_version_hint = self._index_file(db, task, file_entry, rollback_plan)
                             processed_chunks += chunks_created
                             if item_status == "skipped":
                                 skipped_files += 1
+                            if not used_version_hint:
+                                unversioned_files += 1
+                            db.commit()
                         except Exception as exc:  # noqa: BLE001
+                            db.rollback()
                             failed_files += 1
                             self._record_task_item(
                                 db,
@@ -118,41 +141,61 @@ class IngestionService:
                                 message=str(exc),
                                 processed_chunks=0,
                                 source_version=file_entry.modified_at.isoformat() if file_entry.modified_at else "",
+                                stage="failed",
+                                duration_ms=self._duration_ms(file_started),
+                                error_type=type(exc).__name__,
                             )
                             task.error_message = f"{task.error_message}\n{file_entry.path}: {exc}".strip()
+                            task.last_stage = f"failed:{file_entry.path}"
+                            task.heartbeat_at = utc_now()
+                            db.commit()
 
             self._raise_if_cancel_requested(db, task, rollback_plan)
             task.status = "partial_success" if failed_files else "succeeded"
-            task.stats_json = {
-                "processed_files": processed_files,
-                "processed_chunks": processed_chunks,
-                "failed_files": failed_files,
-                "skipped_files": skipped_files,
-                "deleted_files": deleted_files,
-            }
+            task.last_stage = "completed"
+            task.stats_json = self._build_task_stats(
+                task=task,
+                processed_files=processed_files,
+                processed_chunks=processed_chunks,
+                failed_files=failed_files,
+                skipped_files=skipped_files,
+                deleted_files=deleted_files,
+                unversioned_files=unversioned_files,
+            )
         except TaskCanceledError as exc:
             task.status = "canceled"
             task.error_message = "canceled by user"
+            task.last_stage = "canceled"
             task.stats_json = {
-                "processed_files": processed_files,
-                "processed_chunks": processed_chunks,
-                "failed_files": failed_files,
-                "skipped_files": skipped_files,
-                "deleted_files": deleted_files,
+                **self._build_task_stats(
+                    task=task,
+                    processed_files=processed_files,
+                    processed_chunks=processed_chunks,
+                    failed_files=failed_files,
+                    skipped_files=skipped_files,
+                    deleted_files=deleted_files,
+                    unversioned_files=unversioned_files,
+                ),
                 "canceled": True,
                 "rollback": exc.rollback_summary,
             }
         except Exception as exc:  # noqa: BLE001
             task.status = "failed"
             task.error_message = str(exc)
-            task.stats_json = {
-                "processed_files": processed_files,
-                "processed_chunks": processed_chunks,
-                "failed_files": failed_files,
-                "skipped_files": skipped_files,
-                "deleted_files": deleted_files,
-            }
+            task.last_stage = "failed"
+            task.stats_json = self._build_task_stats(
+                task=task,
+                processed_files=processed_files,
+                processed_chunks=processed_chunks,
+                failed_files=failed_files,
+                skipped_files=skipped_files,
+                deleted_files=deleted_files,
+                unversioned_files=unversioned_files,
+            )
         task.finished_at = utc_now()
+        task.claimed_by = None
+        task.claimed_at = None
+        task.heartbeat_at = task.finished_at
         db.commit()
         db.refresh(task)
         return task
@@ -240,26 +283,19 @@ class IngestionService:
                 break
         return matched_documents
 
-    def _index_file(self, db: Session, task: ImportTask, file_entry: WarehouseFileEntry, rollback_plan: dict[str, dict]) -> tuple[int, str]:
+    def _index_file(
+        self,
+        db: Session,
+        task: ImportTask,
+        file_entry: WarehouseFileEntry,
+        rollback_plan: dict[str, dict],
+    ) -> tuple[int, str, bool]:
+        file_started = perf_counter()
         kb = db.get(KnowledgeBase, task.kb_id)
         if kb is None:
             raise ValueError("knowledge base not found")
 
         source_kind = "app" if file_entry.path.startswith("/apps/") else "personal"
-        access_token = self._get_access_token_for_path_if_needed(db, task.owner_wallet_address, file_entry.path)
-        content = self.warehouse_gateway.read_file(task.owner_wallet_address, file_entry.path, access_token=access_token)
-        parsed_text = self.parser.parse(file_entry.name, content)
-        if not parsed_text.strip():
-            raise ValueError("parsed text is empty")
-        self._raise_if_cancel_requested(db, task, rollback_plan)
-
-        config = {**self._default_config(), **(kb.retrieval_config or {})}
-        file_type = infer_file_type(file_entry.name)
-        chunks = self.chunker.chunk(file_entry.name, parsed_text, config)
-        if not chunks:
-            raise ValueError("no chunks created")
-        self._raise_if_cancel_requested(db, task, rollback_plan)
-
         document = db.scalar(
             select(ImportedDocument)
             .where(ImportedDocument.kb_id == kb.id)
@@ -267,6 +303,7 @@ class IngestionService:
         )
         self._capture_document_snapshot(db, kb.id, task.owner_wallet_address, file_entry.path, rollback_plan)
         current_version = file_entry.modified_at.isoformat() if file_entry.modified_at else ""
+        has_version_hint = bool(current_version)
         if (
             task.task_type == "import"
             and document is not None
@@ -282,8 +319,24 @@ class IngestionService:
                 message="source unchanged",
                 processed_chunks=0,
                 source_version=current_version,
+                stage="skipped",
+                duration_ms=self._duration_ms(file_started),
             )
-            return 0, "skipped"
+            return 0, "skipped", has_version_hint
+
+        access_token = self._get_access_token_for_path_if_needed(db, task.owner_wallet_address, file_entry.path)
+        content = self.warehouse_gateway.read_file(task.owner_wallet_address, file_entry.path, access_token=access_token)
+        parsed_text = self.parser.parse(file_entry.name, content)
+        if not parsed_text.strip():
+            raise ValueError("parsed text is empty")
+        self._raise_if_cancel_requested(db, task, rollback_plan)
+
+        config = {**self._default_config(), **(kb.retrieval_config or {})}
+        file_type = infer_file_type(file_entry.name)
+        chunks = self.chunker.chunk(file_entry.name, parsed_text, config)
+        if not chunks:
+            raise ValueError("no chunks created")
+        self._raise_if_cancel_requested(db, task, rollback_plan)
         if document is None:
             document = ImportedDocument(
                 kb_id=kb.id,
@@ -376,9 +429,10 @@ class IngestionService:
             message="indexed successfully",
             processed_chunks=created,
             source_version=current_version,
+            stage="indexed",
+            duration_ms=self._duration_ms(file_started),
         )
-        db.commit()
-        return created, "indexed"
+        return created, "indexed", has_version_hint
 
     def _handle_delete(self, db: Session, task: ImportTask, rollback_plan: dict[str, dict]) -> int:
         documents = self._list_documents_for_delete(db, task)
@@ -395,6 +449,7 @@ class IngestionService:
                 message="document index deleted",
                 processed_chunks=0,
                 source_version=document.source_etag_or_mtime,
+                stage="deleted",
             )
             deleted += 1
         db.commit()
@@ -417,6 +472,39 @@ class IngestionService:
             return self.warehouse_session_service.get_access_token_for_path(db, wallet_address, path)
         return None
 
+    @staticmethod
+    def _duration_ms(started_at: float) -> int:
+        return max(0, int((perf_counter() - started_at) * 1000))
+
+    def _build_task_stats(
+        self,
+        task: ImportTask,
+        processed_files: int,
+        processed_chunks: int,
+        failed_files: int,
+        skipped_files: int,
+        deleted_files: int,
+        unversioned_files: int,
+    ) -> dict:
+        wait_duration_ms = None
+        if task.started_at is not None:
+            wait_duration_ms = max(0, int((task.started_at - task.created_at).total_seconds() * 1000))
+        run_duration_ms = None
+        finished_at = task.finished_at or utc_now()
+        if task.started_at is not None:
+            run_duration_ms = max(0, int((finished_at - task.started_at).total_seconds() * 1000))
+        return {
+            **(task.stats_json or {}),
+            "processed_files": processed_files,
+            "processed_chunks": processed_chunks,
+            "failed_files": failed_files,
+            "skipped_files": skipped_files,
+            "deleted_files": deleted_files,
+            "unversioned_files": unversioned_files,
+            "wait_duration_ms": wait_duration_ms,
+            "run_duration_ms": run_duration_ms,
+        }
+
     def _record_task_item(
         self,
         db: Session,
@@ -427,6 +515,9 @@ class IngestionService:
         message: str,
         processed_chunks: int,
         source_version: str,
+        stage: str | None = None,
+        duration_ms: int | None = None,
+        error_type: str | None = None,
     ) -> None:
         item = ImportTaskItem(
             task_id=task_id,
@@ -436,6 +527,9 @@ class IngestionService:
             message=message,
             processed_chunks=processed_chunks,
             source_version=source_version,
+            stage=stage,
+            duration_ms=duration_ms,
+            error_type=error_type,
         )
         db.add(item)
 

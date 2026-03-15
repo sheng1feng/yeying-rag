@@ -1,0 +1,24 @@
+[Unit]
+Description=Knowledge Worker Instance %i
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=knowledge
+Group=knowledge
+WorkingDirectory=/srv/knowledge/backend
+Environment=PYTHONUNBUFFERED=1
+Environment=WORKER_ENV_FILE=/srv/knowledge/backend/.env
+Environment=WORKER_NAME_PREFIX=knowledge-worker
+ExecStart=/srv/knowledge/backend/scripts/run_worker.sh %i
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

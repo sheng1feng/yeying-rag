@@ -10,12 +10,14 @@ from knowledge.db.session import get_db
 from knowledge.models import ImportTask, ImportTaskItem, KnowledgeBase, SourceBinding
 from knowledge.schemas.tasks import BindingTaskCreateRequest, TaskCreateRequest, TaskResponse
 from knowledge.services.ingestion import IngestionService
+from knowledge.services.task_queue import TaskQueueService
 from knowledge.utils.time import utc_now
 from knowledge.workers.runner import Worker
 
 
 router = APIRouter(tags=["ingestion_tasks"])
 ingestion_service = IngestionService()
+task_queue_service = TaskQueueService()
 worker = Worker()
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "partial_success", "canceled"}
 
@@ -47,6 +49,13 @@ def _serialize_task(task: ImportTask, running_task: ImportTask | None, pending_p
         queue_state = "cancelling"
     elif status == "canceled":
         queue_state = "canceled"
+    wait_duration_ms = None
+    if task.started_at is not None:
+        wait_duration_ms = max(0, int((task.started_at - task.created_at).total_seconds() * 1000))
+    run_duration_ms = None
+    if task.started_at is not None:
+        finished_at = task.finished_at or utc_now()
+        run_duration_ms = max(0, int((finished_at - task.started_at).total_seconds() * 1000))
     return {
         "id": task.id,
         "owner_wallet_address": task.owner_wallet_address,
@@ -64,6 +73,11 @@ def _serialize_task(task: ImportTask, running_task: ImportTask | None, pending_p
         "current_running_task_id": running_task.id if running_task is not None else None,
         "current_running_task_type": running_task.task_type if running_task is not None else None,
         "cancelable": status not in TERMINAL_TASK_STATUSES,
+        "claimed_by": task.claimed_by,
+        "heartbeat_at": task.heartbeat_at,
+        "last_stage": task.last_stage,
+        "wait_duration_ms": wait_duration_ms,
+        "run_duration_ms": run_duration_ms,
     }
 
 
@@ -87,7 +101,25 @@ def _create_task(
     source_paths: list[str],
     stats_json: dict | None = None,
 ) -> dict:
-    task = ingestion_service.create_task(db, wallet_address, kb_id, task_type, source_paths)
+    normalized_paths = task_queue_service.compress_source_paths(source_paths)
+    if not normalized_paths:
+        raise HTTPException(status_code=400, detail="source_paths cannot be empty")
+    duplicate, conflict_message = task_queue_service.find_active_duplicate_or_conflict(
+        db=db,
+        wallet_address=wallet_address,
+        kb_id=kb_id,
+        task_type=task_type,
+        source_paths=normalized_paths,
+    )
+    if duplicate is not None:
+        if stats_json:
+            duplicate.stats_json = {**(duplicate.stats_json or {}), **stats_json}
+            db.commit()
+            db.refresh(duplicate)
+        return _create_task_response(db, duplicate)
+    if conflict_message:
+        raise HTTPException(status_code=409, detail=conflict_message)
+    task = ingestion_service.create_task(db, wallet_address, kb_id, task_type, normalized_paths)
     if stats_json:
         task.stats_json = {**(task.stats_json or {}), **stats_json}
         db.commit()
@@ -120,7 +152,9 @@ def _resolve_binding_paths(
             )
     if not bindings:
         raise HTTPException(status_code=400, detail="no enabled bindings available for knowledge base")
-    source_paths = list(dict.fromkeys(binding.source_path for binding in bindings if str(binding.source_path or "").strip()))
+    source_paths = task_queue_service.compress_source_paths(
+        [binding.source_path for binding in bindings if str(binding.source_path or "").strip()]
+    )
     if not source_paths:
         raise HTTPException(status_code=400, detail="selected bindings have no usable source paths")
     return source_paths, [binding.id for binding in bindings]
@@ -258,15 +292,14 @@ def retry_task(task_id: int, wallet_address: str = Depends(get_current_wallet), 
     task = db.get(ImportTask, task_id)
     if task is None or task.owner_wallet_address != wallet_address:
         raise HTTPException(status_code=404, detail="task not found")
-    cloned = ingestion_service.create_task(
+    return _create_task(
         db=db,
         wallet_address=wallet_address,
         kb_id=task.kb_id,
         task_type=task.task_type,
         source_paths=list(task.source_paths),
+        stats_json={"retried_from_task_id": task.id},
     )
-    running_task, pending_positions = _queue_context(db)
-    return _serialize_task(cloned, running_task, pending_positions)
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskResponse)
@@ -328,6 +361,9 @@ def task_items(task_id: int, wallet_address: str = Depends(get_current_wallet), 
             "message": item.message,
             "processed_chunks": item.processed_chunks,
             "source_version": item.source_version,
+            "stage": item.stage,
+            "duration_ms": item.duration_ms,
+            "error_type": item.error_type,
             "created_at": item.created_at,
         }
         for item in items

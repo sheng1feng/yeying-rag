@@ -28,5 +28,10 @@ class TaskResponse(BaseModel):
     current_running_task_id: int | None = None
     current_running_task_type: str | None = None
     cancelable: bool = False
+    claimed_by: str | None = None
+    heartbeat_at: datetime | None = None
+    last_stage: str | None = None
+    wait_duration_ms: int | None = None
+    run_duration_ms: int | None = None
 
     model_config = {"from_attributes": True}

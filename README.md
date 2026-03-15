@@ -53,6 +53,14 @@ source .venv/bin/activate
 python -m knowledge.workers.runner
 ```
 
+当前 worker 采用按任务 claim/heartbeat 的调度方式：
+
+- 多个 worker 可共享同一数据库协同消费导入任务
+- 同一用户默认最多并发执行 1 个任务，避免单用户大任务挤占全部处理能力
+- `sqlite` 环境会自动退回串行处理；生产建议使用 PostgreSQL 以启用更稳的并发处理
+- 默认部署建议只常驻 `1` 个 worker，其余实例按需启停
+- 独立 worker 的 systemd 部署与扩缩容建议见 `docs/worker-deployment.md`
+
 ## 本地开发默认值
 
 为了方便本地开发，默认配置并不强依赖真实的 `warehouse`、`Weaviate` 或模型网关：
@@ -94,6 +102,9 @@ python -m knowledge.workers.runner
 - `RERANK_MODEL`
 - `RERANK_API_BASE`
 - `RERANK_API_KEY`
+- `WORKER_TASK_CONCURRENCY`
+- `WORKER_MAX_ACTIVE_TASKS_PER_USER`
+- `WORKER_TASK_HEARTBEAT_INTERVAL_SECONDS`
 - `WORKER_NAME`
 - `WORKER_RUN_LEASE_TTL_SECONDS`
 
