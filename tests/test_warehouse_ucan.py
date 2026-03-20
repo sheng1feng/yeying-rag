@@ -5,6 +5,11 @@ from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
 from knowledge.main import app
+from knowledge.services.warehouse_scope import warehouse_app_id, warehouse_app_root
+
+
+APP_ID = warehouse_app_id()
+APP_ROOT = warehouse_app_root()
 
 
 def _login(client: TestClient, account) -> str:
@@ -49,7 +54,7 @@ def test_warehouse_ucan_bind_and_status():
         assert status.json()["bound"] is True
         assert status.json()["binding_type"] == "ucan"
 
-        browse = client.get("/warehouse/browse?path=/personal", headers=headers)
+        browse = client.get(f"/warehouse/browse?path={APP_ROOT}", headers=headers)
         assert browse.status_code == 200
 
 
@@ -72,7 +77,7 @@ def test_warehouse_app_ucan_bind_status():
         bootstrap = client.post(
             "/warehouse/auth/apps/ucan/bootstrap",
             headers=headers,
-            json={"wallet_address": account.address, "app_id": "knowledge-smoke-app", "action": "read"},
+            json={"wallet_address": account.address, "app_id": APP_ID},
         )
         assert bootstrap.status_code == 200
         payload = bootstrap.json()
@@ -83,10 +88,11 @@ def test_warehouse_app_ucan_bind_status():
             headers=headers,
             json={
                 "wallet_address": account.address,
-                "app_id": "knowledge-smoke-app",
+                "app_id": APP_ID,
                 "nonce": payload["nonce"],
                 "signature": signed.signature.hex(),
             },
         )
         assert verify.status_code == 200
-        assert "knowledge-smoke-app" in verify.json()["app_ucan_apps"]
+        assert verify.json()["app_bound"] is True
+        assert APP_ID in verify.json()["app_ucan_apps"]

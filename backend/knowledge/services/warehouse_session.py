@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from knowledge.core.settings import get_settings
 from knowledge.models import WarehouseAppUcanCredential, WarehouseCredential, WarehouseUcanBootstrap, WarehouseUcanCredential
+from knowledge.services.warehouse_scope import extract_app_id_from_path
 from knowledge.utils.time import utc_now
 
 
@@ -60,10 +61,10 @@ class WarehouseSessionService:
             self.settings.warehouse_ucan_action,
         )
 
-    def create_app_ucan_bootstrap(self, db: Session, wallet_address: str, app_id: str, action: str = "read") -> WarehouseUcanBootstrap:
+    def create_app_ucan_bootstrap(self, db: Session, wallet_address: str, app_id: str, action: str = "read,write") -> WarehouseUcanBootstrap:
         if not app_id or "/" in app_id:
             raise ValueError("invalid app id")
-        return self._create_ucan_bootstrap(db, wallet_address, f"app:{app_id}", action or "read")
+        return self._create_ucan_bootstrap(db, wallet_address, f"app:{app_id}", action or "read,write")
 
     def _create_ucan_bootstrap(self, db: Session, wallet_address: str, resource: str, action: str) -> WarehouseUcanBootstrap:
         wallet_lower = wallet_address.lower()
@@ -285,12 +286,7 @@ class WarehouseSessionService:
 
     @staticmethod
     def _extract_app_id(path: str) -> str | None:
-        if not path.startswith("/apps/"):
-            return None
-        rest = path.removeprefix("/apps/")
-        if not rest:
-            return None
-        return rest.split("/", 1)[0] or None
+        return extract_app_id_from_path(path)
 
     def refresh_binding(self, db: Session, wallet_address: str) -> WarehouseCredential:
         credential = self.get_binding(db, wallet_address)

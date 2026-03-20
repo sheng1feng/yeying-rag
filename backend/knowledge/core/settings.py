@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     warehouse_gateway_mode: str = "mock"
     warehouse_base_url: str = "https://webdav.yeying.pub"
     warehouse_webdav_prefix: str = "/dav"
-    warehouse_auth_mode: str = "jwt"
+    warehouse_auth_mode: str = "split"
+    warehouse_app_id: str = "knowledge.yeying.pub"
+    warehouse_apps_prefix: str = "/apps"
     warehouse_service_bearer: str = ""
     warehouse_forward_wallet_header: str = "X-End-User-Wallet"
     warehouse_mock_root: str = str(Path(__file__).resolve().parents[3] / ".mock_warehouse")

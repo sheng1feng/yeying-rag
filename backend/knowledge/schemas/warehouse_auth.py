@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class WarehouseAuthChallengeRequest(BaseModel):
@@ -23,10 +23,14 @@ class WarehouseAuthVerifyRequest(BaseModel):
 class WarehouseBindingStatusResponse(BaseModel):
     wallet_address: str
     bound: bool
+    app_bound: bool = False
     binding_type: str | None = None
     jwt_bound: bool = False
     ucan_bound: bool = False
-    app_ucan_apps: list[str] = []
+    current_app_id: str | None = None
+    current_app_root: str | None = None
+    current_app_upload_dir: str | None = None
+    app_ucan_apps: list[str] = Field(default_factory=list)
     warehouse_base_url: str | None = None
     access_expires_at: datetime | None = None
     refresh_expires_at: datetime | None = None
@@ -56,7 +60,7 @@ class WarehouseUcanVerifyRequest(BaseModel):
 class WarehouseAppUcanBootstrapRequest(BaseModel):
     wallet_address: str
     app_id: str
-    action: str = "read"
+    action: str = "read,write"
 
 
 class WarehouseAppUcanVerifyRequest(BaseModel):

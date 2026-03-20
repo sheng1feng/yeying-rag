@@ -13,6 +13,7 @@ from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
 from knowledge.services.vector_store import build_vector_store
 from knowledge.services.warehouse import WarehouseGateway, WarehouseFileEntry, build_warehouse_gateway
+from knowledge.services.warehouse_scope import warehouse_app_root
 from knowledge.services.warehouse_session import WarehouseSessionService
 from knowledge.utils.time import utc_now
 import uuid
@@ -295,7 +296,7 @@ class IngestionService:
         if kb is None:
             raise ValueError("knowledge base not found")
 
-        source_kind = "app" if file_entry.path.startswith("/apps/") else "personal"
+        source_kind = "app" if file_entry.path.startswith(f"{warehouse_app_root()}/") or file_entry.path == warehouse_app_root() else "external"
         document = db.scalar(
             select(ImportedDocument)
             .where(ImportedDocument.kb_id == kb.id)
@@ -465,7 +466,7 @@ class IngestionService:
         }
 
     def _get_access_token_if_needed(self, db: Session, wallet_address: str) -> str | None:
-        return self._get_access_token_for_path_if_needed(db, wallet_address, "/personal")
+        return self._get_access_token_for_path_if_needed(db, wallet_address, warehouse_app_root())
 
     def _get_access_token_for_path_if_needed(self, db: Session, wallet_address: str, path: str) -> str | None:
         if self.settings.warehouse_gateway_mode == "bound_token":

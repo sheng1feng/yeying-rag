@@ -33,6 +33,8 @@ def ensure_runtime_schema(engine: Engine) -> None:
 
 
 def _ensure_columns(connection, inspector, table_name: str, columns: dict[str, str]) -> None:
+    if not inspector.has_table(table_name):
+        return
     existing = {column["name"] for column in inspector.get_columns(table_name)}
     for column_name, column_type in columns.items():
         if column_name in existing:
@@ -50,5 +52,7 @@ def _ensure_indexes(connection, inspector) -> None:
 
 def _iter_indexes(inspector):
     for table_name in ("import_tasks", "import_task_items"):
+        if not inspector.has_table(table_name):
+            continue
         for index in inspector.get_indexes(table_name):
             yield table_name, index

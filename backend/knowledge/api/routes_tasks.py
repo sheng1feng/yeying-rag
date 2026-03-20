@@ -11,6 +11,7 @@ from knowledge.models import ImportTask, ImportTaskItem, KnowledgeBase, SourceBi
 from knowledge.schemas.tasks import BindingTaskCreateRequest, TaskCreateRequest, TaskResponse
 from knowledge.services.ingestion import IngestionService
 from knowledge.services.task_queue import TaskQueueService
+from knowledge.services.warehouse_scope import ensure_current_app_path
 from knowledge.utils.time import utc_now
 from knowledge.workers.runner import Worker
 
@@ -101,7 +102,11 @@ def _create_task(
     source_paths: list[str],
     stats_json: dict | None = None,
 ) -> dict:
-    normalized_paths = task_queue_service.compress_source_paths(source_paths)
+    try:
+        scoped_paths = [ensure_current_app_path(path, "source_path") for path in source_paths if str(path or "").strip()]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    normalized_paths = task_queue_service.compress_source_paths(scoped_paths)
     if not normalized_paths:
         raise HTTPException(status_code=400, detail="source_paths cannot be empty")
     duplicate, conflict_message = task_queue_service.find_active_duplicate_or_conflict(

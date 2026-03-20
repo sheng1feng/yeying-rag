@@ -1,3 +1,8 @@
+const APP_CONFIG = window.__KNOWLEDGE_CONFIG__ || {};
+const DEFAULT_WAREHOUSE_APP_ID = APP_CONFIG.warehouse_app_id || "knowledge.yeying.pub";
+const DEFAULT_WAREHOUSE_APP_ROOT = APP_CONFIG.warehouse_app_root || `/apps/${DEFAULT_WAREHOUSE_APP_ID}`;
+const DEFAULT_WAREHOUSE_UPLOAD_DIR = APP_CONFIG.warehouse_upload_dir || `${DEFAULT_WAREHOUSE_APP_ROOT}/uploads`;
+
 const state = {
   token: localStorage.getItem("knowledge_token") || "",
   wallet: localStorage.getItem("knowledge_wallet") || "",
@@ -10,7 +15,10 @@ const state = {
   currentKBStats: null,
   currentKBWorkbench: null,
   warehouseBound: false,
-  currentBrowsePath: "/personal",
+  warehouseAppId: DEFAULT_WAREHOUSE_APP_ID,
+  warehouseAppRoot: DEFAULT_WAREHOUSE_APP_ROOT,
+  warehouseUploadDir: DEFAULT_WAREHOUSE_UPLOAD_DIR,
+  currentBrowsePath: DEFAULT_WAREHOUSE_APP_ROOT,
   kbs: [],
   bindings: [],
   documents: [],
@@ -19,10 +27,11 @@ const state = {
   longMemories: [],
   shortMemories: [],
   memoryIngestions: [],
+  searchLabCompare: null,
+  retrievalLogs: [],
+  sourceGovernance: null,
   warehouseEntries: [],
   warehousePreview: null,
-  lastSearchResults: [],
-  lastContextResult: null,
   opsOverview: null,
   opsStores: null,
   opsWorkers: [],
@@ -81,6 +90,35 @@ function shortenMiddle(value, start = 8, end = 6) {
   if (!text) return "";
   if (text.length <= start + end + 3) return text;
   return `${text.slice(0, start)}...${text.slice(-end)}`;
+}
+
+function currentWarehouseAppRoot() {
+  return state.warehouseAppRoot || DEFAULT_WAREHOUSE_APP_ROOT;
+}
+
+function currentWarehouseUploadDir() {
+  return state.warehouseUploadDir || DEFAULT_WAREHOUSE_UPLOAD_DIR;
+}
+
+function syncWarehouseConfig(data = {}) {
+  state.warehouseAppId = data.current_app_id || state.warehouseAppId || DEFAULT_WAREHOUSE_APP_ID;
+  state.warehouseAppRoot = data.current_app_root || state.warehouseAppRoot || DEFAULT_WAREHOUSE_APP_ROOT;
+  state.warehouseUploadDir = data.current_app_upload_dir || state.warehouseUploadDir || DEFAULT_WAREHOUSE_UPLOAD_DIR;
+  if (!state.currentBrowsePath || state.currentBrowsePath === "/" || state.currentBrowsePath.startsWith("/personal")) {
+    state.currentBrowsePath = state.warehouseAppRoot;
+  }
+  const browseInput = el("browse-path");
+  if (browseInput && (!browseInput.value || browseInput.value.startsWith("/personal"))) {
+    browseInput.value = state.currentBrowsePath;
+  }
+  const uploadInput = el("target-dir");
+  if (uploadInput && (!uploadInput.value || uploadInput.value.startsWith("/personal"))) {
+    uploadInput.value = state.warehouseUploadDir;
+  }
+  const currentBrowsePath = el("current-browse-path");
+  if (currentBrowsePath && (!currentBrowsePath.textContent || currentBrowsePath.textContent.startsWith("/personal"))) {
+    currentBrowsePath.textContent = state.currentBrowsePath;
+  }
 }
 
 function renderWalletSummary() {
@@ -434,15 +472,13 @@ function updateSelectedKBUI() {
   const kb = state.selectedKB;
   if (!kb) {
     el("selected-kb-name").textContent = "未选择";
-    el("selected-kb-desc").textContent = "请选择一个知识库后继续绑定、导入和检索。";
+    el("selected-kb-desc").textContent = "请选择一个知识库后继续来源治理、知识项管理与发布。";
     return;
   }
   el("selected-kb-name").textContent = `#${kb.id} ${kb.name}`;
   el("selected-kb-desc").textContent = kb.description || "无描述";
   el("task-kb-id").value = kb.id;
-  el("search-kb-id").value = kb.id;
-  el("context-kb-ids").value = String(kb.id);
-  el("memory-kb-id").value = kb.id;
+  if (el("memory-kb-id")) el("memory-kb-id").value = kb.id;
 }
 
 function setWarehouseBound(bound, expiresAt) {
@@ -474,7 +510,7 @@ function buildRecentActivities() {
       title: upload.file_name,
       subtitle: upload.warehouse_target_path,
       time: upload.created_at,
-      detail: `${formatNumber(upload.size || 0)} bytes · 已写入 warehouse personal`,
+      detail: `${formatNumber(upload.size || 0)} bytes · 已写入 Knowledge App 目录`,
       status: "uploaded",
       tone: "success",
       actions,
@@ -750,11 +786,11 @@ function renderWarehousePreview() {
 
 function pathFieldConfig(fieldId) {
   return {
-    "browse-path": { allowFiles: false, allowDirectories: true, personalOnly: false },
-    "target-dir": { allowFiles: false, allowDirectories: true, personalOnly: true },
-    "binding-path": { allowFiles: true, allowDirectories: true, personalOnly: false },
-    "task-source-path": { allowFiles: true, allowDirectories: true, personalOnly: false },
-  }[fieldId] || { allowFiles: true, allowDirectories: true, personalOnly: false };
+    "browse-path": { allowFiles: false, allowDirectories: true },
+    "target-dir": { allowFiles: false, allowDirectories: true },
+    "binding-path": { allowFiles: true, allowDirectories: true },
+    "task-source-path": { allowFiles: true, allowDirectories: true },
+  }[fieldId] || { allowFiles: true, allowDirectories: true };
 }
 
 function pathFieldLabel(fieldId) {
@@ -768,7 +804,6 @@ function pathFieldLabel(fieldId) {
 
 function pathMatchesField(fieldId, path, entryType) {
   const config = pathFieldConfig(fieldId);
-  if (config.personalOnly && !String(path).startsWith("/personal")) return false;
   if (entryType === "file" && !config.allowFiles) return false;
   if (entryType === "directory" && !config.allowDirectories) return false;
   return true;
@@ -805,7 +840,7 @@ function renderPathPicker(fieldId) {
     modeEl.innerHTML = `
       <span class="picker-chip ${config.allowDirectories ? "active" : ""}">可选目录</span>
       <span class="picker-chip ${config.allowFiles ? "active" : ""}">可选文件</span>
-      <span class="picker-chip ${config.personalOnly ? "active" : ""}">限制 personal</span>
+      <span class="picker-chip active">当前 App 目录</span>
     `;
   }
   const currentPath = state.currentBrowsePath || "/";
@@ -1169,15 +1204,20 @@ async function logout() {
   state.longMemories = [];
   state.shortMemories = [];
   state.memoryIngestions = [];
+  state.searchLabCompare = null;
+  state.retrievalLogs = [];
+  state.sourceGovernance = null;
   state.warehouseEntries = [];
-  state.lastContextResult = null;
+  state.currentBrowsePath = DEFAULT_WAREHOUSE_APP_ROOT;
   state.opsFailures = [];
+  syncWarehouseConfig();
   renderAll();
 }
 
 async function refreshWarehouseStatus() {
   const data = await api("/warehouse/auth/status");
-  setWarehouseBound(Boolean(data.jwt_bound || data.bound), data.access_expires_at);
+  syncWarehouseConfig(data);
+  setWarehouseBound(Boolean(data.app_bound), data.ucan_expires_at || data.access_expires_at);
   return data;
 }
 
@@ -1322,34 +1362,39 @@ async function refreshOps() {
 }
 
 async function bindWarehouse() {
-  return bindWarehouseViaJwt();
+  return bindWarehouseApp();
 }
 
-async function bindWarehouseViaJwt(browserWalletParam = null) {
+async function bindWarehouseApp(browserWalletParam = null) {
   const browserWallet =
     browserWalletParam ||
     (await window.ethereum.request({ method: "eth_requestAccounts" }))[0];
   if (!browserWallet || browserWallet.toLowerCase() !== state.wallet.toLowerCase()) {
     throw new Error("当前浏览器钱包与 knowledge 登录钱包不一致");
   }
-  const challenge = await api("/warehouse/auth/challenge", {
+  const bootstrap = await api("/warehouse/auth/apps/ucan/bootstrap", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: browserWallet }),
+    body: JSON.stringify({ wallet_address: browserWallet, app_id: state.warehouseAppId || DEFAULT_WAREHOUSE_APP_ID }),
   });
   const signature = await window.ethereum.request({
     method: "personal_sign",
-    params: [challenge.challenge, browserWallet],
+    params: [bootstrap.message, browserWallet],
   });
-  return api("/warehouse/auth/verify", {
+  return api("/warehouse/auth/apps/ucan/verify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: browserWallet, signature }),
+    body: JSON.stringify({
+      wallet_address: browserWallet,
+      app_id: state.warehouseAppId || DEFAULT_WAREHOUSE_APP_ID,
+      nonce: bootstrap.nonce,
+      signature,
+    }),
   });
 }
 
 async function unbindWarehouse() {
-  const confirmed = await confirmAction("解绑 warehouse", "解绑后将无法继续浏览、上传和导入 warehouse 资产。");
+  const confirmed = await confirmAction("解绑 warehouse", "解绑后将无法继续浏览、上传和导入当前 Knowledge App 目录中的资产。");
   if (!confirmed) return;
   await api("/warehouse/auth/binding", { method: "DELETE" });
   await refreshWarehouseStatus();
@@ -1580,8 +1625,9 @@ async function updateBindingEnabled(bindingId, enabled) {
 }
 
 async function browseWarehouse(path = null) {
-  const targetPath = path || el("browse-path").value || "/personal";
+  const targetPath = path || el("browse-path").value || currentWarehouseAppRoot();
   const data = await api(`/warehouse/browse?path=${encodeURIComponent(targetPath)}`);
+  syncWarehouseConfig();
   state.currentBrowsePath = data.path;
   state.warehouseEntries = data.entries || [];
   el("browse-path").value = data.path;
@@ -1626,14 +1672,14 @@ function renderWarehouseEntries() {
     .join("");
 }
 
-async function uploadPersonal() {
+async function uploadAppFile() {
   const fileInput = el("upload-file");
   if (!fileInput.files.length) {
     throw new Error("请选择文件");
   }
   const form = new FormData();
   form.append("file", fileInput.files[0]);
-  form.append("target_dir", el("target-dir").value || "/personal/uploads");
+  form.append("target_dir", el("target-dir").value || currentWarehouseUploadDir());
   const result = await api("/warehouse/upload", {
     method: "POST",
     body: form,
@@ -1642,7 +1688,7 @@ async function uploadPersonal() {
   el("binding-path").value = result.warehouse_path;
   setOutput(result);
   await refreshUploads();
-  await browseWarehouse(el("target-dir").value || "/personal/uploads");
+  await browseWarehouse(el("target-dir").value || currentWarehouseUploadDir());
 }
 
 async function refreshUploads() {
@@ -2094,120 +2140,179 @@ async function deleteShortMemory(memoryId) {
   await Promise.all([refreshShortMemory(), refreshMemoryIngestions()]);
 }
 
-async function searchKB() {
-  const kbId = Number(el("search-kb-id").value || currentKBOrThrow());
-  const query = el("search-query").value.trim();
+async function refreshRetrievalLogs() {
+  if (!state.selectedKB) {
+    state.retrievalLogs = [];
+    renderRetrievalLogs();
+    return;
+  }
+  state.retrievalLogs = await api(`/kbs/${state.selectedKB.id}/retrieval-logs`);
+  renderRetrievalLogs();
+}
+
+async function refreshSourceGovernance() {
+  if (!state.selectedKB) {
+    state.sourceGovernance = null;
+    renderSourceGovernance();
+    return;
+  }
+  state.sourceGovernance = await api(`/kbs/${state.selectedKB.id}/source-governance`);
+  renderSourceGovernance();
+}
+
+async function runSearchLabCompare() {
+  const kbId = currentKBOrThrow();
+  const query = (el("search-lab-query").value || "").trim();
+  const topK = Number(el("search-lab-top-k").value || 5) || 5;
+  const resultView = el("search-lab-result-view").value || "audit";
+  const availabilityMode = el("search-lab-availability-mode").value || "allow_all";
   if (!query) {
-    throw new Error("query 不能为空");
+    throw new Error("请先输入 query");
   }
-  const result = await api(`/kbs/${kbId}/search`, {
+  const result = await api(`/kbs/${kbId}/search-lab/compare`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      top_k: topK,
+      result_view: resultView,
+      availability_mode: availabilityMode,
+    }),
   });
-  const box = el("search-results");
-  if (!result.length) {
-    box.innerHTML = `<div class="empty">没有命中结果。</div>`;
-  } else {
-    const queryText = query;
-    box.innerHTML = result
-      .map(
-        (item, index) => `
-          <div class="table-row search-table">
-            <div class="table-cell">Top ${index + 1}</div>
-            <div class="table-cell" title="${escapeHtml(item.source_path)}">${escapeHtml(item.source_path)}</div>
-            <div class="table-cell">${Number(item.score).toFixed(4)}</div>
-            <div class="table-cell wrap">${highlightQuery(item.text, queryText)}</div>
-            <div class="table-actions">
-              <button class="secondary" data-action="show-search-hit" data-index="${index}">详情</button>
-              <button class="ghost" data-action="open-browse-path" data-path="${item.source_path}">定位源文件</button>
-            </div>
+  state.searchLabCompare = result;
+  setOutput(result);
+  await Promise.all([refreshRetrievalLogs(), refreshSourceGovernance()]);
+  renderSearchLabCompare();
+}
+
+function renderSearchLabMode(modeTitle, payload) {
+  const hits = payload?.hits || [];
+  return `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>${escapeHtml(modeTitle)}</strong><span class="pill">${escapeHtml(payload?.mode || "-")}</span></div>
+      ${
+        hits.length
+          ? hits
+              .map(
+                (hit) => `
+                  <div class="list-item">
+                    <div class="list-head">
+                      <div class="list-title">${escapeHtml(hit.title || hit.text || hit.result_kind || "-")}</div>
+                      <span class="pill ${hit.content_health_status === "healthy" ? "success" : hit.content_health_status === "stale" ? "warning" : "danger"}">${escapeHtml(hit.content_health_status)}</span>
+                    </div>
+                    <div class="list-subtitle">${escapeHtml(hit.statement || hit.text || "")}</div>
+                    <div class="helper">kind=${escapeHtml(hit.result_kind)} · score=${escapeHtml(String(hit.score ?? "-"))}</div>
+                    ${hit.source_refs?.length ? `<div class="helper">sources=${escapeHtml(hit.source_refs.join(", "))}</div>` : ""}
+                    ${hit.audit_info && Object.keys(hit.audit_info).length ? `<div class="helper">${escapeHtml(JSON.stringify(hit.audit_info))}</div>` : ""}
+                  </div>
+                `,
+              )
+              .join("")
+          : `<div class="empty">无命中。</div>`
+      }
+    </div>
+  `;
+}
+
+function renderSearchLabCompare() {
+  const box = el("search-lab-compare");
+  if (!box) return;
+  if (!state.selectedKB) {
+    box.className = "empty";
+    box.textContent = "先选择知识库。";
+    return;
+  }
+  if (!state.searchLabCompare) {
+    box.className = "empty";
+    box.textContent = "输入 query 后运行 search lab，对比 formal/evidence/formal_first。";
+    return;
+  }
+  const payload = state.searchLabCompare;
+  box.className = "detail-list";
+  box.innerHTML = `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>当前发布面</strong><span class="pill">${escapeHtml(payload.current_release?.version || "workspace-only")}</span></div>
+      <div class="helper">query=${escapeHtml(payload.query)} · retrieval_log_id=${escapeHtml(String(payload.retrieval_log_id || "-"))}</div>
+    </div>
+    ${renderSearchLabMode("Formal Only", payload.formal_only)}
+    ${renderSearchLabMode("Evidence Only", payload.evidence_only)}
+    ${renderSearchLabMode("Formal First", payload.formal_first)}
+  `;
+}
+
+function renderRetrievalLogs() {
+  const list = el("search-lab-log-list");
+  if (!list) return;
+  if (!state.selectedKB) {
+    list.innerHTML = `<div class="empty">先选择知识库后查看检索日志。</div>`;
+    return;
+  }
+  if (!state.retrievalLogs.length) {
+    list.innerHTML = `<div class="empty">当前知识库还没有检索日志。</div>`;
+    return;
+  }
+  list.innerHTML = state.retrievalLogs
+    .map(
+      (log) => `
+        <div class="list-item">
+          <div class="list-head">
+            <div class="list-title">${escapeHtml(log.query)}</div>
+            <span class="pill">${escapeHtml(log.query_mode)}</span>
           </div>
-        `,
-      )
-      .join("");
-  }
-  state.lastSearchResults = result;
-  setOutput(result);
+          <div class="helper">release_id=${escapeHtml(String(log.release_id || "-"))} · ${formatDate(log.created_at)}</div>
+          <div class="helper">${escapeHtml(JSON.stringify(log.result_summary_json || {}))}</div>
+          <div class="list-actions">
+            <button class="ghost" data-action="show-retrieval-log" data-log-id="${log.id}">详情</button>
+          </div>
+        </div>
+      `,
+    )
+    .join("");
 }
 
-async function buildContext() {
-  const sessionId = el("context-session-id").value.trim();
-  const memoryNamespace = el("context-memory-namespace").value.trim();
-  const kbIds = el("context-kb-ids")
-    .value.split(",")
-    .map((item) => Number(item.trim()))
-    .filter(Boolean);
-  const query = el("context-query").value.trim();
-  if (!sessionId || !kbIds.length || !query) {
-    throw new Error("session_id、kb_ids、query 都不能为空");
+function renderSourceGovernance() {
+  const box = el("search-lab-governance");
+  if (!box) return;
+  if (!state.selectedKB) {
+    box.className = "empty";
+    box.textContent = "先选择知识库后查看来源治理信息。";
+    return;
   }
-  el("short-session-id").value = sessionId;
-  el("short-memory-namespace").value = memoryNamespace;
-  const result = await api("/retrieval/context", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query,
-      conversation: {
-        session_id: sessionId,
-        memory_namespace: memoryNamespace || null,
-      },
-      scope: {
-        kb_ids: kbIds,
-        source_scope: [],
-        filters: {},
-      },
-      policy: {},
-      caller: {
-        app_name: "knowledge-console",
-      },
-      debug: true,
-    }),
-  });
-  state.lastContextResult = result;
-  el("context-results").textContent = JSON.stringify(result, null, 2);
-  openDrawer("Retrieval Context", result);
-  setOutput(result);
-}
-
-async function ingestMemoryFromContext() {
-  const sessionId = el("context-session-id").value.trim();
-  const memoryNamespace = el("context-memory-namespace").value.trim();
-  const kbIds = el("context-kb-ids")
-    .value.split(",")
-    .map((item) => Number(item.trim()))
-    .filter(Boolean);
-  const query = el("context-query").value.trim();
-  const answer = el("context-answer").value.trim();
-  if (!sessionId || !query) {
-    throw new Error("请先填写 session_id 和 query");
+  if (!state.sourceGovernance) {
+    box.className = "empty";
+    box.textContent = "当前知识库尚未加载来源治理信息。";
+    return;
   }
-  el("short-session-id").value = sessionId;
-  el("short-memory-namespace").value = memoryNamespace;
-  const result = await api("/memory/ingest", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      memory_namespace: memoryNamespace || null,
-      kb_id: kbIds[0] || state.selectedKB?.id || null,
-      query,
-      answer,
-      source: "console",
-      trace_id: state.lastContextResult?.trace?.trace_id || state.lastContextResult?.trace_id || "",
-      source_refs:
-        state.lastContextResult?.knowledge?.source_refs ||
-        state.lastContextResult?.source_refs ||
-        [],
-    }),
-  });
-  setOutput(result);
-  await Promise.all([refreshLongMemory(), refreshShortMemory(), refreshMemoryIngestions()]);
+  const counts = state.sourceGovernance.status_counts || {};
+  const assets = state.sourceGovernance.assets || [];
+  box.className = "detail-list";
+  box.innerHTML = `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>治理摘要</strong><span class="pill">sources=${escapeHtml(String(counts.sources_total || 0))}</span></div>
+      <div class="helper">source_missing=${escapeHtml(String(counts.source_missing || 0))} · stale=${escapeHtml(String(counts.stale || 0))} · assets_missing=${escapeHtml(String(counts.assets_missing || 0))}</div>
+    </div>
+    ${
+      assets.length
+        ? assets
+            .map(
+              (asset) => `
+                <div class="list-item">
+                  <div class="list-head">
+                    <div class="list-title">${escapeHtml(asset.asset_path)}</div>
+                    <span class="pill ${asset.availability_status === "missing" ? "danger" : "warning"}">${escapeHtml(asset.availability_status)}</span>
+                  </div>
+                  <div class="helper">source_id=${escapeHtml(String(asset.source_id))} · evidence_count=${escapeHtml(String(asset.evidence_count || 0))}</div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="empty">当前没有需要治理的 source_missing / stale 资产。</div>`
+    }
+  `;
 }
 
 async function refreshSelectedData() {
-  await Promise.all([refreshBindings(), refreshDocuments(), refreshCurrentKBStats()]);
+  await Promise.all([refreshBindings(), refreshDocuments(), refreshCurrentKBStats(), refreshRetrievalLogs(), refreshSourceGovernance()]);
 }
 
 async function refreshAll() {
@@ -2216,13 +2321,13 @@ async function refreshAll() {
     return;
   }
   const warehouseStatus = await refreshWarehouseStatus();
-  if (!warehouseStatus.jwt_bound && !warehouseStatus.bound) {
+  if (!warehouseStatus.app_bound) {
     try {
-      await bindWarehouseViaJwt();
-      notify("success", "已自动通过 JWT 绑定 warehouse personal");
+      await bindWarehouseApp();
+      notify("success", "已自动绑定 Knowledge App 目录权限");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      notify("info", `knowledge 已登录，warehouse 自动绑定未完成：${message}`);
+      notify("info", `knowledge 已登录，Knowledge App 自动绑定未完成：${message}`);
     }
   }
   await Promise.all([
@@ -2230,9 +2335,6 @@ async function refreshAll() {
     refreshKBs(),
     refreshTasks(),
     refreshUploads(),
-    refreshLongMemory(),
-    refreshShortMemory(),
-    refreshMemoryIngestions(),
     refreshOps(),
   ]);
   await refreshSelectedData();
@@ -2252,7 +2354,9 @@ function renderAll() {
   renderBreadcrumbs();
   renderTaskDetail();
   renderOps();
-  renderMemoryIngestions();
+  renderSearchLabCompare();
+  renderRetrievalLogs();
+  renderSourceGovernance();
   renderSystemReadiness();
   updateMetrics();
   renderRecentActivity();
@@ -2265,7 +2369,9 @@ function attachStaticEvents() {
 
   el("jump-dashboard").addEventListener("click", () => setView("dashboard"));
   el("jump-warehouse").addEventListener("click", () => setView("warehouse"));
-  el("jump-retrieval").addEventListener("click", () => setView("retrieval"));
+  if (el("jump-search-lab")) {
+    el("jump-search-lab").addEventListener("click", () => setView("search-lab"));
+  }
   el("refresh-ops").addEventListener("click", () => withFeedback(refreshOps, "运维状态已刷新")().catch(() => {}));
 
   el("connect-wallet").addEventListener("click", () => withFeedback(loginWithWallet, "knowledge 登录成功")().catch(() => {}));
@@ -2294,8 +2400,8 @@ function attachStaticEvents() {
   el("add-binding").addEventListener("click", () => withFeedback(() => addBinding(), "绑定源已添加")().catch(() => {}));
 
   el("browse-warehouse").addEventListener("click", () => withFeedback(() => browseWarehouse(), "仓库目录已刷新")().catch(() => {}));
-  el("browse-personal-root").addEventListener("click", () => withFeedback(() => browseWarehouse("/personal"))().catch(() => {}));
-  el("browse-apps-root").addEventListener("click", () => withFeedback(() => browseWarehouse("/apps"))().catch(() => {}));
+  el("browse-app-root").addEventListener("click", () => withFeedback(() => browseWarehouse(currentWarehouseAppRoot()))().catch(() => {}));
+  el("browse-upload-root").addEventListener("click", () => withFeedback(() => browseWarehouse(currentWarehouseUploadDir()))().catch(() => {}));
   el("clear-warehouse-filter").addEventListener("click", () => {
     el("warehouse-filter").value = "";
     renderWarehouseEntries();
@@ -2311,7 +2417,7 @@ function attachStaticEvents() {
     node.addEventListener("focus", () => renderPathPicker(node.id));
     node.addEventListener("click", () => renderPathPicker(node.id));
   });
-  el("upload-personal").addEventListener("click", () => withFeedback(uploadPersonal, "文件已上传到 warehouse personal")().catch(() => {}));
+  el("upload-app").addEventListener("click", () => withFeedback(uploadAppFile, "文件已上传到 Knowledge App 目录")().catch(() => {}));
   el("refresh-uploads").addEventListener("click", () => withFeedback(refreshUploads, "上传记录已刷新")().catch(() => {}));
 
   el("create-import-task").addEventListener("click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
@@ -2348,15 +2454,17 @@ function attachStaticEvents() {
   });
   el("document-filter").addEventListener("input", () => renderDocuments());
   el("refresh-documents").addEventListener("click", () => withFeedback(refreshDocuments, "文档列表已刷新")().catch(() => {}));
-  el("refresh-long-memory").addEventListener("click", () => withFeedback(refreshLongMemory, "长期记忆已刷新")().catch(() => {}));
-  el("save-memory").addEventListener("click", () => withFeedback(saveLongMemory, "长期记忆已写入")().catch(() => {}));
-  el("refresh-short-memory").addEventListener("click", () => withFeedback(refreshShortMemory, "短期记忆已刷新")().catch(() => {}));
-  el("save-short-memory").addEventListener("click", () => withFeedback(saveShortMemory, "短期记忆已写入")().catch(() => {}));
-  el("refresh-memory-ingestions").addEventListener("click", () => withFeedback(refreshMemoryIngestions, "自动沉淀记录已刷新")().catch(() => {}));
-
-  el("search-kb").addEventListener("click", () => withFeedback(searchKB, "检索完成")().catch(() => {}));
-  el("build-context").addEventListener("click", () => withFeedback(buildContext, "上下文已生成")().catch(() => {}));
-  el("ingest-memory-context").addEventListener("click", () => withFeedback(ingestMemoryFromContext, "本轮记忆已沉淀")().catch(() => {}));
+  el("run-search-lab").addEventListener("click", () => withFeedback(runSearchLabCompare, "Search Lab 对比已更新")().catch(() => {}));
+  el("refresh-search-lab").addEventListener("click", () =>
+    withFeedback(async () => {
+      await Promise.all([refreshRetrievalLogs(), refreshSourceGovernance()]);
+      renderSearchLabCompare();
+    }, "Search Lab 数据已刷新")().catch(() => {}),
+  );
+  el("refresh-retrieval-logs").addEventListener("click", () => withFeedback(refreshRetrievalLogs, "检索日志已刷新")().catch(() => {}));
+  el("refresh-source-governance").addEventListener("click", () =>
+    withFeedback(refreshSourceGovernance, "来源治理信息已刷新")().catch(() => {}),
+  );
 
   el("confirm-cancel").addEventListener("click", () => closeConfirm(false));
   el("confirm-ok").addEventListener("click", () => closeConfirm(true));
@@ -2578,13 +2686,14 @@ function attachStaticEvents() {
       if (eventRow) openDrawer(`记忆沉淀 #${eventRow.id}`, eventRow);
       return;
     }
+    if (action === "show-retrieval-log") {
+      const log = state.retrievalLogs.find((item) => item.id === Number(target.dataset.logId));
+      if (log) openDrawer(`检索日志 #${log.id}`, log);
+      return;
+    }
     if (action === "jump-view") {
       setView(target.dataset.view || "dashboard");
       return;
-    }
-    if (action === "show-search-hit") {
-      const item = state.lastSearchResults?.[Number(target.dataset.index)];
-      if (item) openDrawer(`检索命中 #${item.chunk_id}`, item);
     }
   });
 }

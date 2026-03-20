@@ -29,6 +29,12 @@ from knowledge.schemas.warehouse import (
     WarehouseEntry,
 )
 from knowledge.services.bindings import BindingService
+from knowledge.services.warehouse_scope import (
+    ensure_current_app_path,
+    warehouse_app_id,
+    warehouse_app_root,
+    warehouse_default_upload_dir,
+)
 from knowledge.services.warehouse import build_warehouse_gateway
 from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
@@ -43,7 +49,7 @@ binding_service = BindingService()
 
 
 def _require_bound_token_if_needed(db: Session, wallet_address: str) -> str | None:
-    return _require_token_for_path(db, wallet_address, "/personal")
+    return _require_token_for_path(db, wallet_address, warehouse_app_root())
 
 
 def _require_token_for_path(db: Session, wallet_address: str, path: str) -> str | None:
@@ -55,37 +61,53 @@ def _require_token_for_path(db: Session, wallet_address: str, path: str) -> str 
         raise HTTPException(status_code=400, detail=f"warehouse binding required: {exc}") from exc
 
 
-@router.get("/warehouse/auth/status", response_model=WarehouseBindingStatusResponse)
-def warehouse_auth_status(wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> WarehouseBindingStatusResponse:
+def _ensure_current_app_path_or_400(path: str | None, label: str = "path") -> str:
+    try:
+        return ensure_current_app_path(path, label)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _current_app_binding_status(db: Session, wallet_address: str) -> WarehouseBindingStatusResponse:
     jwt = warehouse_session_service.get_binding(db, wallet_address)
     ucan = warehouse_session_service.get_ucan_binding(db, wallet_address)
     app_ucans = warehouse_session_service.list_app_ucan_bindings(db, wallet_address)
-    if ucan is not None:
-        return WarehouseBindingStatusResponse(
-            wallet_address=wallet_address,
-            bound=jwt is not None or ucan is not None,
-            binding_type="jwt" if jwt is not None else "ucan",
-            jwt_bound=jwt is not None,
-            ucan_bound=True,
-            app_ucan_apps=[item.app_id for item in app_ucans],
-            warehouse_base_url=warehouse_session_service.settings.warehouse_base_url,
-            access_expires_at=jwt.access_expires_at if jwt is not None else None,
-            refresh_expires_at=jwt.refresh_expires_at if jwt is not None else None,
-            ucan_expires_at=ucan.root_expires_at,
-        )
-    if jwt is None:
-        return WarehouseBindingStatusResponse(wallet_address=wallet_address, bound=False, app_ucan_apps=[item.app_id for item in app_ucans])
+    current_app = warehouse_app_id()
+    current_app_binding = warehouse_session_service.get_app_ucan_binding(db, wallet_address, current_app)
+    bound = jwt is not None or ucan is not None or current_app_binding is not None
+    if jwt is not None:
+        binding_type = "jwt"
+    elif current_app_binding is not None:
+        binding_type = "app_ucan"
+    elif ucan is not None:
+        binding_type = "ucan"
+    else:
+        binding_type = None
     return WarehouseBindingStatusResponse(
         wallet_address=wallet_address,
-        bound=True,
-        binding_type="jwt",
-        jwt_bound=True,
-        ucan_bound=False,
+        bound=bound,
+        app_bound=current_app_binding is not None,
+        binding_type=binding_type,
+        jwt_bound=jwt is not None,
+        ucan_bound=ucan is not None,
+        current_app_id=current_app,
+        current_app_root=warehouse_app_root(),
+        current_app_upload_dir=warehouse_default_upload_dir(),
         app_ucan_apps=[item.app_id for item in app_ucans],
-        warehouse_base_url=jwt.warehouse_base_url,
-        access_expires_at=jwt.access_expires_at,
-        refresh_expires_at=jwt.refresh_expires_at,
+        warehouse_base_url=(jwt.warehouse_base_url if jwt is not None else warehouse_session_service.settings.warehouse_base_url) if bound else None,
+        access_expires_at=jwt.access_expires_at if jwt is not None else None,
+        refresh_expires_at=jwt.refresh_expires_at if jwt is not None else None,
+        ucan_expires_at=(
+            current_app_binding.root_expires_at
+            if current_app_binding is not None
+            else (ucan.root_expires_at if ucan is not None else None)
+        ),
     )
+
+
+@router.get("/warehouse/auth/status", response_model=WarehouseBindingStatusResponse)
+def warehouse_auth_status(wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> WarehouseBindingStatusResponse:
+    return _current_app_binding_status(db, wallet_address)
 
 
 @router.post("/warehouse/auth/challenge", response_model=WarehouseAuthChallengeResponse)
@@ -111,17 +133,10 @@ def warehouse_auth_verify(
     if payload.wallet_address.lower() != wallet_address:
         raise HTTPException(status_code=400, detail="wallet mismatch")
     try:
-        credential = warehouse_session_service.verify_and_store(db, payload.wallet_address, payload.signature)
+        warehouse_session_service.verify_and_store(db, payload.wallet_address, payload.signature)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return WarehouseBindingStatusResponse(
-        wallet_address=wallet_address,
-        bound=True,
-        binding_type="jwt",
-        warehouse_base_url=credential.warehouse_base_url,
-        access_expires_at=credential.access_expires_at,
-        refresh_expires_at=credential.refresh_expires_at,
-    )
+    return _current_app_binding_status(db, wallet_address)
 
 
 @router.post("/warehouse/auth/ucan/bootstrap", response_model=WarehouseUcanBootstrapResponse)
@@ -153,22 +168,10 @@ def warehouse_auth_ucan_verify(
     if payload.wallet_address.lower() != wallet_address:
         raise HTTPException(status_code=400, detail="wallet mismatch")
     try:
-        credential = warehouse_session_service.verify_ucan_and_store(db, payload.wallet_address, payload.nonce, payload.signature)
+        warehouse_session_service.verify_ucan_and_store(db, payload.wallet_address, payload.nonce, payload.signature)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    jwt = warehouse_session_service.get_binding(db, wallet_address)
-    return WarehouseBindingStatusResponse(
-        wallet_address=wallet_address,
-        bound=True,
-        binding_type="jwt" if jwt is not None else "ucan",
-        jwt_bound=jwt is not None,
-        ucan_bound=True,
-        app_ucan_apps=[item.app_id for item in warehouse_session_service.list_app_ucan_bindings(db, wallet_address)],
-        warehouse_base_url=warehouse_session_service.settings.warehouse_base_url,
-        access_expires_at=jwt.access_expires_at if jwt is not None else None,
-        refresh_expires_at=jwt.refresh_expires_at if jwt is not None else None,
-        ucan_expires_at=credential.root_expires_at,
-    )
+    return _current_app_binding_status(db, wallet_address)
 
 
 @router.post("/warehouse/auth/apps/ucan/bootstrap", response_model=WarehouseUcanBootstrapResponse)
@@ -179,6 +182,8 @@ def warehouse_auth_app_ucan_bootstrap(
 ) -> WarehouseUcanBootstrapResponse:
     if payload.wallet_address.lower() != wallet_address:
         raise HTTPException(status_code=400, detail="wallet mismatch")
+    if payload.app_id != warehouse_app_id():
+        raise HTTPException(status_code=400, detail=f"app_id must be {warehouse_app_id()}")
     bootstrap = warehouse_session_service.create_app_ucan_bootstrap(db, payload.wallet_address, payload.app_id, payload.action)
     return WarehouseUcanBootstrapResponse(
         wallet_address=wallet_address,
@@ -199,8 +204,10 @@ def warehouse_auth_app_ucan_verify(
 ) -> WarehouseBindingStatusResponse:
     if payload.wallet_address.lower() != wallet_address:
         raise HTTPException(status_code=400, detail="wallet mismatch")
+    if payload.app_id != warehouse_app_id():
+        raise HTTPException(status_code=400, detail=f"app_id must be {warehouse_app_id()}")
     try:
-        credential = warehouse_session_service.verify_app_ucan_and_store(
+        warehouse_session_service.verify_app_ucan_and_store(
             db,
             payload.wallet_address,
             payload.app_id,
@@ -209,19 +216,7 @@ def warehouse_auth_app_ucan_verify(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    jwt = warehouse_session_service.get_binding(db, wallet_address)
-    return WarehouseBindingStatusResponse(
-        wallet_address=wallet_address,
-        bound=True,
-        binding_type="jwt" if jwt is not None else "ucan",
-        jwt_bound=jwt is not None,
-        ucan_bound=warehouse_session_service.get_ucan_binding(db, wallet_address) is not None,
-        app_ucan_apps=[item.app_id for item in warehouse_session_service.list_app_ucan_bindings(db, wallet_address)],
-        warehouse_base_url=warehouse_session_service.settings.warehouse_base_url,
-        access_expires_at=jwt.access_expires_at if jwt is not None else None,
-        refresh_expires_at=jwt.refresh_expires_at if jwt is not None else None,
-        ucan_expires_at=credential.root_expires_at,
-    )
+    return _current_app_binding_status(db, wallet_address)
 
 
 @router.delete("/warehouse/auth/binding")
@@ -232,18 +227,20 @@ def warehouse_auth_unbind(wallet_address: str = Depends(get_current_wallet), db:
 
 @router.get("/warehouse/browse", response_model=WarehouseBrowseResponse)
 def browse_warehouse(
-    path: str = "/personal",
+    path: str = warehouse_app_root(),
     wallet_address: str = Depends(get_current_wallet),
     db: Session = Depends(get_db),
 ) -> WarehouseBrowseResponse:
-    access_token = _require_token_for_path(db, wallet_address, path)
+    normalized_path = _ensure_current_app_path_or_400(path or warehouse_app_root())
+    access_token = _require_token_for_path(db, wallet_address, normalized_path)
+    gateway.ensure_app_space(wallet_address, access_token=access_token)
     try:
-        entries = gateway.browse(wallet_address, path, access_token=access_token)
+        entries = gateway.browse(wallet_address, normalized_path, access_token=access_token)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return WarehouseBrowseResponse(
         wallet_address=wallet_address,
-        path=path,
+        path=normalized_path,
         entries=[
             WarehouseEntry(
                 path=entry.path,
@@ -258,20 +255,20 @@ def browse_warehouse(
 
 
 @router.post("/warehouse/upload", response_model=UploadResponse)
-async def upload_to_personal(
+async def upload_to_app_dir(
     file: UploadFile = File(...),
-    target_dir: str = Form("/personal/uploads"),
+    target_dir: str = Form(warehouse_default_upload_dir()),
     wallet_address: str = Depends(get_current_wallet),
     db: Session = Depends(get_db),
 ) -> UploadResponse:
-    if not target_dir.startswith("/personal"):
-        raise HTTPException(status_code=400, detail="uploads are only allowed to personal")
+    normalized_target_dir = _ensure_current_app_path_or_400(target_dir or warehouse_default_upload_dir(), "target_dir")
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="file is empty")
-    access_token = _require_token_for_path(db, wallet_address, target_dir)
+    access_token = _require_token_for_path(db, wallet_address, normalized_target_dir)
+    gateway.ensure_app_space(wallet_address, access_token=access_token)
     try:
-        warehouse_path = gateway.upload_personal(wallet_address, target_dir, file.filename, content, access_token=access_token)
+        warehouse_path = gateway.upload_file(wallet_address, normalized_target_dir, file.filename, content, access_token=access_token)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record = UploadRecord(
@@ -315,14 +312,15 @@ def list_upload_records(wallet_address: str = Depends(get_current_wallet), db: S
 
 @router.get("/warehouse/preview")
 def preview_warehouse_file(path: str, wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> dict:
-    access_token = _require_token_for_path(db, wallet_address, path)
+    normalized_path = _ensure_current_app_path_or_400(path)
+    access_token = _require_token_for_path(db, wallet_address, normalized_path)
     try:
-        entries = gateway.browse(wallet_address, path, access_token=access_token)
+        entries = gateway.browse(wallet_address, normalized_path, access_token=access_token)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     entry = None
     for item in entries:
-        if item.path.rstrip("/") == path.rstrip("/"):
+        if item.path.rstrip("/") == normalized_path.rstrip("/"):
             entry = item
             break
     if entry is None and entries:
@@ -355,16 +353,15 @@ def create_binding(
     kb = db.get(KnowledgeBase, kb_id)
     if kb is None or kb.owner_wallet_address != wallet_address:
         raise HTTPException(status_code=404, detail="knowledge base not found")
-    if not (payload.source_path.startswith("/personal") or payload.source_path.startswith("/apps/")):
-        raise HTTPException(status_code=400, detail="source path must be under personal or apps")
+    normalized_source_path = _ensure_current_app_path_or_400(payload.source_path, "source_path")
     existing = db.scalar(
         select(SourceBinding)
         .where(SourceBinding.kb_id == kb_id)
-        .where(SourceBinding.source_path == payload.source_path)
+        .where(SourceBinding.source_path == normalized_source_path)
     )
     if existing is not None:
         return existing
-    binding = SourceBinding(kb_id=kb_id, source_path=payload.source_path, scope_type=payload.scope_type)
+    binding = SourceBinding(kb_id=kb_id, source_path=normalized_source_path, scope_type=payload.scope_type)
     db.add(binding)
     db.commit()
     db.refresh(binding)

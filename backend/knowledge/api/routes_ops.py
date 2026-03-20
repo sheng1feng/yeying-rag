@@ -8,7 +8,19 @@ from sqlalchemy.orm import Session
 
 from knowledge.api.deps import get_current_wallet
 from knowledge.db.session import get_db
-from knowledge.models import ImportedChunk, ImportedDocument, ImportTask, KnowledgeBase, LongTermMemory, MemoryIngestionEvent, ShortTermMemory, UploadRecord, WorkerStatus
+from knowledge.models import (
+    ImportedChunk,
+    ImportedDocument,
+    ImportTask,
+    KnowledgeBase,
+    LongTermMemory,
+    MemoryIngestionEvent,
+    RetrievalLog,
+    ShortTermMemory,
+    SourceAsset,
+    UploadRecord,
+    WorkerStatus,
+)
 from knowledge.core.settings import get_settings
 from knowledge.services.vector_store import build_vector_store
 from knowledge.services.task_queue import TaskQueueService
@@ -68,6 +80,13 @@ def overview(db: Session = Depends(get_db)) -> dict:
         "long_term_memories": int(db.scalar(select(func.count(LongTermMemory.id))) or 0),
         "short_term_memories": int(db.scalar(select(func.count(ShortTermMemory.id))) or 0),
         "memory_ingestions": int(db.scalar(select(func.count(MemoryIngestionEvent.id))) or 0),
+        "retrieval_logs": int(db.scalar(select(func.count(RetrievalLog.id))) or 0),
+        "source_assets_missing": int(
+            db.scalar(select(func.count(SourceAsset.id)).where(SourceAsset.availability_status == "missing")) or 0
+        ),
+        "source_assets_stale": int(
+            db.scalar(select(func.count(SourceAsset.id)).where(SourceAsset.availability_status == "changed")) or 0
+        ),
         "uploads": int(db.scalar(select(func.count(UploadRecord.id))) or 0),
     }
 

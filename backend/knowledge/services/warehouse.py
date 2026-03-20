@@ -10,7 +10,7 @@ from xml.etree import ElementTree
 import httpx
 
 from knowledge.core.settings import get_settings
-from knowledge.services.warehouse_session import WarehouseSessionService
+from knowledge.services.warehouse_scope import ensure_current_app_path, warehouse_app_directories, warehouse_app_root, warehouse_default_upload_dir
 
 
 @dataclass
@@ -26,7 +26,10 @@ class WarehouseGateway:
     def browse(self, wallet_address: str, path: str, access_token: str | None = None) -> list[WarehouseFileEntry]:
         raise NotImplementedError
 
-    def upload_personal(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+        raise NotImplementedError
+
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
         raise NotImplementedError
 
     def read_file(self, wallet_address: str, path: str, access_token: str | None = None) -> bytes:
@@ -36,24 +39,32 @@ class WarehouseGateway:
 class MockWarehouseGateway(WarehouseGateway):
     def __init__(self, root: str) -> None:
         self.root = Path(root)
+        self.settings = get_settings()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _resolve_wallet_root(self, wallet_address: str) -> Path:
         normalized = wallet_address.lower()
         wallet_root = self.root / normalized
-        (wallet_root / "personal").mkdir(parents=True, exist_ok=True)
         (wallet_root / "apps").mkdir(parents=True, exist_ok=True)
+        self.ensure_app_space(wallet_address)
         return wallet_root
 
     def _resolve_path(self, wallet_address: str, path: str) -> Path:
         normalized = "/" + path.strip().lstrip("/")
         if normalized == "/":
-            normalized = "/personal"
+            normalized = warehouse_app_root(self.settings)
         wallet_root = self._resolve_wallet_root(wallet_address)
         target = (wallet_root / normalized.lstrip("/")).resolve()
         if wallet_root.resolve() not in target.parents and target != wallet_root.resolve():
             raise ValueError("path escapes wallet root")
         return target
+
+    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+        wallet_root = self.root / wallet_address.lower()
+        wallet_root.mkdir(parents=True, exist_ok=True)
+        for directory in warehouse_app_directories(self.settings):
+            target = (wallet_root / directory.lstrip("/")).resolve()
+            target.mkdir(parents=True, exist_ok=True)
 
     def browse(self, wallet_address: str, path: str, access_token: str | None = None) -> list[WarehouseFileEntry]:
         target = self._resolve_path(wallet_address, path)
@@ -85,11 +96,10 @@ class MockWarehouseGateway(WarehouseGateway):
             )
         return entries
 
-    def upload_personal(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
-        target_dir = target_dir.strip() or "/personal/uploads"
-        if not target_dir.startswith("/personal"):
-            raise ValueError("uploads are only allowed to personal")
-        destination = self._resolve_path(wallet_address, target_dir) / file_name
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+        normalized_target_dir = ensure_current_app_path(target_dir or warehouse_default_upload_dir(self.settings), "target_dir", self.settings)
+        self.ensure_app_space(wallet_address)
+        destination = self._resolve_path(wallet_address, normalized_target_dir) / file_name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
         return "/" + str(destination.relative_to(self._resolve_wallet_root(wallet_address))).replace(os.sep, "/")
@@ -105,6 +115,7 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
     def __init__(self, base_url: str, webdav_prefix: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.webdav_prefix = "/" + webdav_prefix.strip().strip("/")
+        self.settings = get_settings()
 
     def _headers(self, access_token: str | None) -> dict[str, str]:
         if not access_token:
@@ -149,12 +160,14 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
         response.raise_for_status()
         return self._parse_propfind(path, response.text)
 
-    def upload_personal(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
-        target_dir = target_dir.strip() or "/personal/uploads"
-        if not target_dir.startswith("/personal"):
-            raise ValueError("uploads are only allowed to personal")
-        self._ensure_directory(target_dir, access_token)
-        target_path = f"{target_dir.rstrip('/')}/{file_name}"
+    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+        for directory in warehouse_app_directories(self.settings):
+            self._ensure_directory(directory, access_token)
+
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+        normalized_target_dir = ensure_current_app_path(target_dir or warehouse_default_upload_dir(self.settings), "target_dir", self.settings)
+        self.ensure_app_space(wallet_address, access_token=access_token)
+        target_path = f"{normalized_target_dir.rstrip('/')}/{file_name}"
         response = httpx.put(
             self._dav_url(target_path),
             headers=self._headers(access_token),
