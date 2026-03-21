@@ -4,6 +4,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path
 
@@ -48,6 +50,7 @@ def test_candidate_generation_from_source_and_accept_to_formal_item():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Candidate KB", "description": "candidate"}).json()["id"]
 
         source, evidence = _create_evidence_ready_source(
@@ -96,6 +99,7 @@ def test_manual_item_create_records_manual_provenance_and_evidence_links():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Manual KB", "description": "manual"}).json()["id"]
 
         _source, evidence = _create_evidence_ready_source(
@@ -134,6 +138,7 @@ def test_manual_item_update_creates_new_revision_and_keeps_multiple_evidence_lin
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Revision KB", "description": "revisions"}).json()["id"]
 
         source, evidence = _create_evidence_ready_source(
@@ -205,6 +210,7 @@ def test_invalid_manual_item_payload_returns_structured_contract_error():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Invalid Contract KB", "description": "invalid"}).json()["id"]
 
         created = client.post(
@@ -221,3 +227,36 @@ def test_invalid_manual_item_payload_returns_structured_contract_error():
         detail = created.json()["detail"]
         assert detail["item_type"] == "procedure"
         assert detail["errors"][0]["field"] == "steps"
+
+
+def test_candidate_generation_respects_kb_ownership():
+    owner = Account.create()
+    intruder = Account.create()
+    with TestClient(app) as client:
+        owner_token = _login(client, owner)
+        owner_headers = {"Authorization": f"Bearer {owner_token}"}
+        configure_warehouse_credentials(client, owner_headers)
+        kb_id = client.post("/kbs", headers=owner_headers, json={"name": "Owned KB", "description": "owned"}).json()["id"]
+
+        source, evidence = _create_evidence_ready_source(
+            client,
+            owner_headers,
+            kb_id,
+            "library/owned-source",
+            "faq.txt",
+            b"Q: Who owns this KB?\nA: Only the owner can manage it.",
+        )
+        assert evidence
+
+        intruder_token = _login(client, intruder)
+        intruder_headers = {"Authorization": f"Bearer {intruder_token}"}
+
+        by_source = client.post(f"/kbs/{kb_id}/sources/{source['id']}/generate-candidates", headers=intruder_headers)
+        assert by_source.status_code == 404
+
+        by_asset = client.post(f"/kbs/{kb_id}/assets/{evidence[0]['asset_id']}/generate-candidates", headers=intruder_headers)
+        assert by_asset.status_code == 404
+
+        owner_candidates = client.get(f"/kbs/{kb_id}/candidates", headers=owner_headers)
+        assert owner_candidates.status_code == 200
+        assert owner_candidates.json() == []

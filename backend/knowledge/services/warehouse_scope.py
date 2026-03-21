@@ -25,7 +25,7 @@ def warehouse_apps_prefix(settings: Settings | None = None) -> str:
 
 def warehouse_app_id(settings: Settings | None = None) -> str:
     current = _settings(settings)
-    candidate = str(current.warehouse_app_id or current.warehouse_ucan_siwe_domain or current.app_name).strip()
+    candidate = str(current.warehouse_app_id or current.app_name).strip()
     if not candidate:
         raise ValueError("warehouse app id is required")
     return candidate

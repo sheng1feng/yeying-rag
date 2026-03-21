@@ -20,6 +20,7 @@ from knowledge.models import (
 from knowledge.schemas.future_domain import KBReleaseRead, ServiceGrantRead
 from knowledge.schemas.grants import ServiceGrantResolvedRead
 from knowledge.schemas.service_search import (
+    RESULT_VIEWS,
     ServiceSearchEvidenceSummary,
     ServiceSearchHit,
     ServiceSearchResponse,
@@ -31,7 +32,7 @@ from knowledge.services.service_principals import ServicePrincipalService
 
 
 ALLOWED_MODES = {"formal_first", "formal_only", "evidence_only"}
-ALLOWED_RESULT_VIEWS = {"compact", "referenced", "audit"}
+ALLOWED_RESULT_VIEWS = set(RESULT_VIEWS)
 ALLOWED_AVAILABILITY_MODES = {"allow_all", "healthy_only", "exclude_source_missing"}
 
 
@@ -73,21 +74,30 @@ class ServiceSearchService:
         kb_id: int,
         query: str,
         mode: str,
-        result_view: str,
+        result_view: str | None,
         availability_mode: str,
         top_k: int,
     ) -> ServiceSearchResponse:
         normalized_mode = self._normalize_choice(mode, ALLOWED_MODES, "mode")
-        normalized_view = self._normalize_choice(result_view, ALLOWED_RESULT_VIEWS, "result_view")
         normalized_availability = self._normalize_choice(availability_mode, ALLOWED_AVAILABILITY_MODES, "availability_mode")
         principal = self.principal_service.verify_api_key(db, service_api_key)
         grant = self._resolve_grant_for_kb(db, principal.id, kb_id)
         release = self._resolve_release_for_search(db, grant, normalized_mode)
+        normalized_view = self._resolve_result_view(result_view, grant.default_result_mode)
 
         formal_hits: list[ServiceSearchHit] = []
         evidence_hits: list[ServiceSearchHit] = []
+        used_evidence_ids: set[int] = set()
         if normalized_mode in {"formal_first", "formal_only"} and release is not None:
-            formal_hits = self._search_formal(db, release, query, normalized_view, normalized_availability, top_k)
+            formal_hits = self._search_formal(
+                db,
+                release,
+                query,
+                normalized_view,
+                normalized_availability,
+                top_k,
+                used_evidence_ids=used_evidence_ids,
+            )
         if normalized_mode == "evidence_only":
             evidence_hits = self._search_evidence(
                 db,
@@ -101,11 +111,6 @@ class ServiceSearchService:
         elif normalized_mode == "formal_first":
             remaining = max(0, top_k - len(formal_hits))
             if remaining > 0:
-                used_evidence_ids = {
-                    summary.evidence_id
-                    for hit in formal_hits
-                    for summary in (hit.evidence_summaries or [])
-                }
                 evidence_hits = self._search_evidence(
                     db,
                     kb_id=kb_id,
@@ -152,6 +157,7 @@ class ServiceSearchService:
         availability_mode: str,
         top_k: int,
         include_zero_scores: bool = False,
+        used_evidence_ids: set[int] | None = None,
     ) -> list[ServiceSearchHit]:
         rows = db.execute(
             select(KBReleaseItem, KnowledgeItem, KnowledgeItemRevision)
@@ -181,6 +187,8 @@ class ServiceSearchService:
             score = self._formal_score(query, revision.title, revision.statement, item.is_hotfix, health)
             if score <= 0 and not include_zero_scores:
                 continue
+            if used_evidence_ids is not None:
+                used_evidence_ids.update(evidence.id for evidence in evidence_units)
             candidates.append(
                 (
                     max(score, 0.0),
@@ -255,6 +263,7 @@ class ServiceSearchService:
         health: str,
     ) -> ServiceSearchHit:
         source_refs = list(dict.fromkeys(asset.asset_path for asset in source_assets))
+        asset_by_id = {asset.id: asset for asset in source_assets}
         hit = ServiceSearchHit(
             result_kind="formal",
             score=round(score, 6),
@@ -274,10 +283,12 @@ class ServiceSearchService:
                     evidence_id=evidence.id,
                     evidence_type=evidence.evidence_type,
                     text_excerpt=evidence.text[:200],
-                    content_health_status=self._content_health_for_assets([asset]) if asset is not None else health,
-                    source_ref=asset.asset_path if asset is not None else "",
+                    content_health_status=self._content_health_for_assets([asset_by_id[evidence.asset_id]])
+                    if asset_by_id.get(evidence.asset_id) is not None
+                    else health,
+                    source_ref=asset_by_id[evidence.asset_id].asset_path if asset_by_id.get(evidence.asset_id) is not None else "",
                 )
-                for evidence, asset in zip(evidence_units, source_assets, strict=False)
+                for evidence in evidence_units
             ]
             hit.source_health_details = [
                 ServiceSearchSourceHealthDetail(
@@ -368,7 +379,7 @@ class ServiceSearchService:
         statuses = {asset.availability_status for asset in source_assets}
         if "missing" in statuses:
             return "source_missing"
-        if "changed" in statuses:
+        if "missing_unconfirmed" in statuses or "changed" in statuses:
             return "stale"
         return "healthy"
 
@@ -412,6 +423,11 @@ class ServiceSearchService:
         if normalized not in allowed:
             raise ValueError(f"{field_name} must be one of: {', '.join(sorted(allowed))}")
         return normalized
+
+    def _resolve_result_view(self, requested_result_view: str | None, default_result_mode: str | None) -> str:
+        if requested_result_view is not None:
+            return self._normalize_choice(requested_result_view, ALLOWED_RESULT_VIEWS, "result_view")
+        return self._normalize_choice(default_result_mode or RESULT_VIEWS[0], ALLOWED_RESULT_VIEWS, "default_result_mode")
 
     def record_retrieval_log(
         self,

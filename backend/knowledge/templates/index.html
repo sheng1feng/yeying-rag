@@ -120,7 +120,7 @@
               <div class="feature-grid">
                 <div class="feature-item">
                   <div class="feature-title">1. 资产接入</div>
-                  <div class="feature-text">自动连接 `warehouse` 的 Knowledge App 空间，只浏览和上传当前应用目录下的原始资产。</div>
+                  <div class="feature-text">通过受限 WebDAV `ak/sk` 接入 `warehouse`，只访问当前 Knowledge App 目录下被显式授权的资产。</div>
                 </div>
                 <div class="feature-item">
                   <div class="feature-title">2. 索引建库</div>
@@ -143,10 +143,11 @@
               </div>
               <div class="workflow-steps">
                 <div class="workflow-step"><strong>Step 1</strong><span>钱包登录</span></div>
-                <div class="workflow-step"><strong>Step 2</strong><span>浏览 / 上传资产</span></div>
-                <div class="workflow-step"><strong>Step 3</strong><span>来源扫描与证据构建</span></div>
-                <div class="workflow-step"><strong>Step 4</strong><span>知识项审核与工作区整理</span></div>
-                <div class="workflow-step"><strong>Step 5</strong><span>发布、授权与检索审计</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>导入读凭证 / 写凭证</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>按凭证浏览 / 上传资产</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>来源扫描与证据构建</span></div>
+                <div class="workflow-step"><strong>Step 5</strong><span>知识项审核与工作区整理</span></div>
+                <div class="workflow-step"><strong>Step 6</strong><span>发布、授权与检索审计</span></div>
               </div>
             </div>
           </div>
@@ -206,18 +207,39 @@
                 <div class="path-input-wrap">
                   <input id="binding-path" data-path-field="binding-path" placeholder="例如 {{ warehouse_upload_dir }}/a.txt" />
                 </div>
+                <select id="binding-credential-id">
+                  <option value="">选择读凭证</option>
+                </select>
                 <button id="add-binding">绑定</button>
               </div>
-              <div class="helper">只允许绑定当前 Knowledge App 目录内的路径。点击输入框可直接从当前仓库目录选择。</div>
+              <div class="helper">绑定源必须选择一把已导入的读凭证；路径只能落在当前 Knowledge App 目录且位于该凭证根路径下。</div>
               <div class="list" id="binding-list"></div>
             </div>
 
             <div class="card">
               <div class="section-header">
-                <h2>知识库工作台</h2>
+                <h2>读凭证管理</h2>
               </div>
-              <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
+              <div class="form-grid">
+                <input id="read-credential-key-id" placeholder="ak_xxx" />
+                <input id="read-credential-key-secret" placeholder="sk_xxx" />
+                <div class="path-input-wrap">
+                  <input id="read-credential-root-path" data-path-field="read-credential-root-path" placeholder="例如 {{ warehouse_app_root }}/library" />
+                </div>
+                <div class="toolbar">
+                  <button id="save-read-credential">导入读凭证</button>
+                </div>
+              </div>
+              <div class="helper">建议一把读凭证只服务一个绑定源，不复用到多个无关目录。</div>
+              <div class="list" id="read-credential-list"></div>
             </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>知识库工作台</h2>
+            </div>
+            <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
           </div>
         </section>
 
@@ -235,6 +257,9 @@
                 <div class="path-input-wrap">
                   <input id="browse-path" data-path-field="browse-path" value="{{ warehouse_app_root }}" />
                 </div>
+                <select id="warehouse-access-source">
+                  <option value="">选择浏览凭证</option>
+                </select>
                 <button id="browse-warehouse">浏览</button>
               </div>
               <div class="inline-form" style="margin-top: 10px">
@@ -257,8 +282,22 @@
 
             <div class="card">
               <div class="section-header">
-                <h2>资产详情 / 上传</h2>
+                <h2>写凭证 / 上传</h2>
               </div>
+              <div class="form-grid">
+                <input id="write-credential-key-id" placeholder="ak_xxx" />
+                <input id="write-credential-key-secret" placeholder="sk_xxx" />
+                <div class="path-input-wrap">
+                  <input id="write-credential-root-path" data-path-field="write-credential-root-path" value="{{ warehouse_upload_dir }}" />
+                </div>
+                <div class="toolbar">
+                  <button id="save-write-credential">保存写凭证</button>
+                  <button id="delete-write-credential" class="danger">删除写凭证</button>
+                </div>
+              </div>
+              <div class="helper">写凭证单独用于当前 Knowledge App 目录的上传/写入，不参与绑定源读取。</div>
+              <div class="list" id="write-credential-list"></div>
+              <hr />
               <div class="form-grid">
                 <div class="path-input-wrap">
                   <input id="target-dir" data-path-field="target-dir" value="{{ warehouse_upload_dir }}" />
@@ -269,7 +308,7 @@
                   <button class="secondary" id="refresh-uploads">刷新上传记录</button>
                 </div>
               </div>
-              <div class="helper">上传只允许写入当前 Knowledge App 目录，默认目标为 `uploads/`，上传成功后可立即导入知识库。</div>
+              <div class="helper">上传只使用当前写凭证。未配置写凭证时不会回退到钱包代理访问。</div>
               <hr />
               <div id="warehouse-preview" class="empty">点击左侧文件可查看预览，点击目录可进入。</div>
             </div>
@@ -439,9 +478,10 @@
               </div>
               <div class="workflow-steps">
                 <div class="workflow-step"><strong>Step 1</strong><span>钱包 challenge / verify 登录 `knowledge`，获取 `knowledge JWT`。</span></div>
-                <div class="workflow-step"><strong>Step 2</strong><span>服务侧通过 `POST /service/search*` 读取已发布知识视图。</span></div>
-                <div class="workflow-step"><strong>Step 3</strong><span>管理侧通过 `search-lab`、`retrieval-logs`、`source-governance` 调试命中与健康度。</span></div>
-                <div class="workflow-step"><strong>Step 4</strong><span>如需发布变更，先在工作区更新知识项，再通过 `releases` 与 `grants` 控制读面。</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>在 `warehouse` 自行创建受限 `ak/sk`，再导入到 `knowledge` 作为读凭证或写凭证。</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>服务侧通过 `POST /service/search*` 读取已发布知识视图。</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>管理侧通过 `search-lab`、`retrieval-logs`、`source-governance` 调试命中与健康度。</span></div>
+                <div class="workflow-step"><strong>Step 5</strong><span>如需发布变更，先在工作区更新知识项，再通过 `releases` 与 `grants` 控制读面。</span></div>
               </div>
               <div class="helper">交互式 OpenAPI：`/docs`。仓库文档：`docs/api-integration.md`。</div>
             </div>
@@ -485,11 +525,11 @@
                 <h2>产品操作手册</h2>
               </div>
               <div class="workflow-steps">
-                <div class="workflow-step"><strong>1</strong><span>登录钱包后，系统自动尝试绑定当前 Knowledge App 目录权限。</span></div>
-                <div class="workflow-step"><strong>2</strong><span>在“资产仓库”中浏览或上传文件，并注册 source。</span></div>
-                <div class="workflow-step"><strong>3</strong><span>完成 source scan、evidence build、candidate 生成与人工知识项整理。</span></div>
-                <div class="workflow-step"><strong>4</strong><span>通过 release 发布稳定视图，再为服务创建 grant。</span></div>
-                <div class="workflow-step"><strong>5</strong><span>使用 search lab、retrieval logs 与 source governance 验证结果与治理状态。</span></div>
+                <div class="workflow-step"><strong>1</strong><span>登录钱包后，先导入读凭证与写凭证。</span></div>
+                <div class="workflow-step"><strong>2</strong><span>在“资产仓库”中选择浏览凭证；上传操作只走写凭证。</span></div>
+                <div class="workflow-step"><strong>3</strong><span>创建绑定源时选择对应读凭证，后续导入/重建按绑定源使用该凭证读取。</span></div>
+                <div class="workflow-step"><strong>4</strong><span>完成 source scan、evidence build、candidate 生成与人工知识项整理。</span></div>
+                <div class="workflow-step"><strong>5</strong><span>通过 release 发布稳定视图，再为服务创建 grant，并用 search lab 验证结果。</span></div>
               </div>
               <div class="helper">完整手册见 `docs/console-operations.md`。</div>
             </div>
@@ -500,8 +540,8 @@
               </div>
               <div class="feature-grid">
                 <div class="feature-item">
-                  <div class="feature-title">只读资产中心</div>
-                  <div class="feature-text">knowledge 只消费 `warehouse` 资产，不回写知识处理结果。</div>
+                  <div class="feature-title">最小权限访问</div>
+                  <div class="feature-text">读绑定源与写入凭证分离，不再依赖后台长期持有的钱包代理能力。</div>
                 </div>
                 <div class="feature-item">
                   <div class="feature-title">任务治理</div>

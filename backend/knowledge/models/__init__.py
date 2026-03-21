@@ -24,10 +24,7 @@ from knowledge.models.entities import (
     SourceBinding,
     UploadRecord,
     WalletUser,
-    WarehouseAppUcanCredential,
-    WarehouseCredential,
-    WarehouseUcanBootstrap,
-    WarehouseUcanCredential,
+    WarehouseAccessCredential,
     WorkerStatus,
 )
 
@@ -57,9 +54,6 @@ __all__ = [
     "SourceBinding",
     "UploadRecord",
     "WalletUser",
-    "WarehouseAppUcanCredential",
-    "WarehouseCredential",
-    "WarehouseUcanBootstrap",
-    "WarehouseUcanCredential",
+    "WarehouseAccessCredential",
     "WorkerStatus",
 ]

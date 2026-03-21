@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,17 +23,28 @@ class WarehouseFileEntry:
     modified_at: datetime | None = None
 
 
+@dataclass
+class WarehouseRequestAuth:
+    kind: str
+    username: str | None = None
+    password: str | None = None
+
+    @classmethod
+    def basic(cls, username: str, password: str) -> "WarehouseRequestAuth":
+        return cls(kind="basic", username=username, password=password)
+
+
 class WarehouseGateway:
-    def browse(self, wallet_address: str, path: str, access_token: str | None = None) -> list[WarehouseFileEntry]:
+    def browse(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> list[WarehouseFileEntry]:
         raise NotImplementedError
 
-    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+    def ensure_app_space(self, wallet_address: str, auth: WarehouseRequestAuth | None = None) -> None:
         raise NotImplementedError
 
-    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth: WarehouseRequestAuth | None = None) -> str:
         raise NotImplementedError
 
-    def read_file(self, wallet_address: str, path: str, access_token: str | None = None) -> bytes:
+    def read_file(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> bytes:
         raise NotImplementedError
 
 
@@ -47,7 +59,7 @@ class MockWarehouseGateway(WarehouseGateway):
         wallet_root = self.root / normalized
         (wallet_root / "apps").mkdir(parents=True, exist_ok=True)
         self.ensure_app_space(wallet_address)
-        return wallet_root
+        return wallet_root.resolve()
 
     def _resolve_path(self, wallet_address: str, path: str) -> Path:
         normalized = "/" + path.strip().lstrip("/")
@@ -59,14 +71,14 @@ class MockWarehouseGateway(WarehouseGateway):
             raise ValueError("path escapes wallet root")
         return target
 
-    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+    def ensure_app_space(self, wallet_address: str, auth: WarehouseRequestAuth | None = None) -> None:
         wallet_root = self.root / wallet_address.lower()
         wallet_root.mkdir(parents=True, exist_ok=True)
         for directory in warehouse_app_directories(self.settings):
             target = (wallet_root / directory.lstrip("/")).resolve()
             target.mkdir(parents=True, exist_ok=True)
 
-    def browse(self, wallet_address: str, path: str, access_token: str | None = None) -> list[WarehouseFileEntry]:
+    def browse(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> list[WarehouseFileEntry]:
         target = self._resolve_path(wallet_address, path)
         if not target.exists():
             return []
@@ -96,7 +108,7 @@ class MockWarehouseGateway(WarehouseGateway):
             )
         return entries
 
-    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth: WarehouseRequestAuth | None = None) -> str:
         normalized_target_dir = ensure_current_app_path(target_dir or warehouse_default_upload_dir(self.settings), "target_dir", self.settings)
         self.ensure_app_space(wallet_address)
         destination = self._resolve_path(wallet_address, normalized_target_dir) / file_name
@@ -104,7 +116,7 @@ class MockWarehouseGateway(WarehouseGateway):
         destination.write_bytes(content)
         return "/" + str(destination.relative_to(self._resolve_wallet_root(wallet_address))).replace(os.sep, "/")
 
-    def read_file(self, wallet_address: str, path: str, access_token: str | None = None) -> bytes:
+    def read_file(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> bytes:
         target = self._resolve_path(wallet_address, path)
         if not target.exists() or not target.is_file():
             raise FileNotFoundError(path)
@@ -117,12 +129,18 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
         self.webdav_prefix = "/" + webdav_prefix.strip().strip("/")
         self.settings = get_settings()
 
-    def _headers(self, access_token: str | None) -> dict[str, str]:
-        if not access_token:
-            raise ValueError("warehouse access token is required")
-        return {"Authorization": f"Bearer {access_token}"}
+    def _headers(self, auth: WarehouseRequestAuth | None) -> dict[str, str]:
+        if auth is None:
+            raise ValueError("warehouse credentials are required")
+        if auth.kind == "basic":
+            if not auth.username or auth.password is None:
+                raise ValueError("warehouse access key credentials are required")
+            raw = f"{auth.username}:{auth.password}".encode("utf-8")
+            encoded = base64.b64encode(raw).decode("ascii")
+            return {"Authorization": f"Basic {encoded}"}
+        raise ValueError(f"unsupported warehouse auth kind: {auth.kind}")
 
-    def _ensure_directory(self, directory: str, access_token: str | None) -> None:
+    def _ensure_directory(self, directory: str, auth: WarehouseRequestAuth | None) -> None:
         normalized = "/" + directory.strip().strip("/")
         if normalized in {"", "/"}:
             return
@@ -133,7 +151,7 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
             response = httpx.request(
                 "PROPFIND",
                 self._dav_url(current),
-                headers={**self._headers(access_token), "Depth": "0"},
+                headers={**self._headers(auth), "Depth": "0"},
                 timeout=30.0,
             )
             if response.status_code in (200, 207):
@@ -143,7 +161,7 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
             mkcol = httpx.request(
                 "MKCOL",
                 self._dav_url(current),
-                headers=self._headers(access_token),
+                headers=self._headers(auth),
                 timeout=30.0,
             )
             if mkcol.status_code not in (201, 405):
@@ -153,32 +171,32 @@ class BoundTokenWarehouseGateway(WarehouseGateway):
         path = "/" + path.strip().lstrip("/")
         return f"{self.base_url}{self.webdav_prefix}{quote(path)}"
 
-    def browse(self, wallet_address: str, path: str, access_token: str | None = None) -> list[WarehouseFileEntry]:
-        headers = self._headers(access_token)
+    def browse(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> list[WarehouseFileEntry]:
+        headers = self._headers(auth)
         headers["Depth"] = "1"
         response = httpx.request("PROPFIND", self._dav_url(path), headers=headers, timeout=30.0)
         response.raise_for_status()
         return self._parse_propfind(path, response.text)
 
-    def ensure_app_space(self, wallet_address: str, access_token: str | None = None) -> None:
+    def ensure_app_space(self, wallet_address: str, auth: WarehouseRequestAuth | None = None) -> None:
         for directory in warehouse_app_directories(self.settings):
-            self._ensure_directory(directory, access_token)
+            self._ensure_directory(directory, auth)
 
-    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, access_token: str | None = None) -> str:
+    def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth: WarehouseRequestAuth | None = None) -> str:
         normalized_target_dir = ensure_current_app_path(target_dir or warehouse_default_upload_dir(self.settings), "target_dir", self.settings)
-        self.ensure_app_space(wallet_address, access_token=access_token)
+        self.ensure_app_space(wallet_address, auth=auth)
         target_path = f"{normalized_target_dir.rstrip('/')}/{file_name}"
         response = httpx.put(
             self._dav_url(target_path),
-            headers=self._headers(access_token),
+            headers=self._headers(auth),
             content=content,
             timeout=120.0,
         )
         response.raise_for_status()
         return target_path
 
-    def read_file(self, wallet_address: str, path: str, access_token: str | None = None) -> bytes:
-        response = httpx.get(self._dav_url(path), headers=self._headers(access_token), timeout=120.0)
+    def read_file(self, wallet_address: str, path: str, auth: WarehouseRequestAuth | None = None) -> bytes:
+        response = httpx.get(self._dav_url(path), headers=self._headers(auth), timeout=120.0)
         response.raise_for_status()
         return response.content
 

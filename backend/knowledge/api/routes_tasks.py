@@ -157,6 +157,12 @@ def _resolve_binding_paths(
             )
     if not bindings:
         raise HTTPException(status_code=400, detail="no enabled bindings available for knowledge base")
+    missing_credentials = [binding.id for binding in bindings if binding.credential_id is None]
+    if missing_credentials:
+        raise HTTPException(
+            status_code=400,
+            detail=f"selected bindings are missing credentials: {', '.join(str(item) for item in missing_credentials)}",
+        )
     source_paths = task_queue_service.compress_source_paths(
         [binding.source_path for binding in bindings if str(binding.source_path or "").strip()]
     )
@@ -173,7 +179,8 @@ def create_import_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    return _create_task(db, wallet_address, kb_id, "import", payload.source_paths)
+    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    return _create_task(db, wallet_address, kb_id, "import", payload.source_paths, stats_json=stats_json)
 
 
 @router.post("/kbs/{kb_id}/tasks/reindex", response_model=TaskResponse)
@@ -184,7 +191,8 @@ def create_reindex_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    return _create_task(db, wallet_address, kb_id, "reindex", payload.source_paths)
+    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    return _create_task(db, wallet_address, kb_id, "reindex", payload.source_paths, stats_json=stats_json)
 
 
 @router.post("/kbs/{kb_id}/tasks/delete", response_model=TaskResponse)
@@ -195,7 +203,8 @@ def create_delete_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    return _create_task(db, wallet_address, kb_id, "delete", payload.source_paths)
+    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    return _create_task(db, wallet_address, kb_id, "delete", payload.source_paths, stats_json=stats_json)
 
 
 @router.post("/kbs/{kb_id}/tasks/import-from-bindings", response_model=TaskResponse)

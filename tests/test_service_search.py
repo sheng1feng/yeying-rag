@@ -4,6 +4,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path
 
@@ -38,12 +40,13 @@ def _create_grant(
     *,
     principal_id: int,
     release_selection_mode: str,
+    default_result_mode: str = "compact",
     pinned_release_id: int | None = None,
 ) -> dict:
     body = {
         "service_principal_id": principal_id,
         "release_selection_mode": release_selection_mode,
-        "default_result_mode": "compact",
+        "default_result_mode": default_result_mode,
     }
     if pinned_release_id is not None:
         body["pinned_release_id"] = pinned_release_id
@@ -70,6 +73,7 @@ def _upload_source_and_build_evidence(
     source_dir: str,
     file_name: str,
     content: bytes,
+    missing_policy: str = "mark_missing",
 ) -> tuple[dict, list[dict]]:
     upload = client.post(
         "/warehouse/upload",
@@ -85,6 +89,7 @@ def _upload_source_and_build_evidence(
             "source_type": "warehouse",
             "source_path": warehouse_app_path(source_dir),
             "scope_type": "directory",
+            "missing_policy": missing_policy,
         },
     )
     source.raise_for_status()
@@ -152,6 +157,7 @@ def test_service_search_endpoints_support_result_views():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Service Search KB", "description": "search"}).json()["id"]
 
         _source, evidence = _upload_source_and_build_evidence(
@@ -223,6 +229,7 @@ def test_service_search_formal_first_falls_back_to_evidence():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Fallback KB", "description": "fallback"}).json()["id"]
 
         _source, evidence = _upload_source_and_build_evidence(
@@ -271,6 +278,7 @@ def test_service_search_availability_modes_filter_source_missing_results():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Availability KB", "description": "availability"}).json()["id"]
 
         source_dir = "library/availability-search"
@@ -328,11 +336,182 @@ def test_service_search_availability_modes_filter_source_missing_results():
         assert exclude_missing.json()["hits"] == []
 
 
+def test_service_search_uses_grant_default_result_view_when_request_omits_it():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+        kb_id = client.post("/kbs", headers=headers, json={"name": "Default View KB", "description": "default-view"}).json()["id"]
+
+        _source, evidence = _upload_source_and_build_evidence(
+            client,
+            headers,
+            kb_id,
+            source_dir="library/default-view",
+            file_name="guide.md",
+            content=b"# Default View\n\nAudit details should be returned from the grant default.",
+        )
+        _create_manual_item(
+            client,
+            headers,
+            kb_id,
+            title="Default view fact",
+            statement="Audit details should be returned from the grant default.",
+            item_type="fact",
+            payload={"fact": "Audit details should be returned from the grant default."},
+            evidence_unit_ids=[evidence[0]["id"]],
+        )
+        _publish_release(client, headers, kb_id, version="release-1")
+
+        principal, api_key = _create_service_principal(
+            client,
+            headers,
+            service_id="service-default-view",
+            display_name="Service Default View",
+        )
+        _create_grant(
+            client,
+            headers,
+            kb_id,
+            principal_id=principal["id"],
+            release_selection_mode="latest_published",
+            default_result_mode="audit",
+        )
+
+        response = client.post(
+            "/service/search/formal",
+            headers={"X-Service-Api-Key": api_key},
+            json={"kb_id": kb_id, "query": "grant default"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        assert payload["result_view"] == "audit"
+        assert payload["hits"][0]["evidence_summaries"]
+        assert payload["hits"][0]["source_health_details"]
+
+
+def test_service_search_formal_first_dedupes_formal_evidence_overlap_for_referenced_view():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+        kb_id = client.post("/kbs", headers=headers, json={"name": "Dedup KB", "description": "dedup"}).json()["id"]
+
+        _source, evidence = _upload_source_and_build_evidence(
+            client,
+            headers,
+            kb_id,
+            source_dir="library/dedup-search",
+            file_name="guide.txt",
+            content=b"Published release is the only supported surface.",
+        )
+        _create_manual_item(
+            client,
+            headers,
+            kb_id,
+            title="Supported surface",
+            statement="Published release is the only supported surface.",
+            item_type="fact",
+            payload={"fact": "Published release is the only supported surface."},
+            evidence_unit_ids=[evidence[0]["id"]],
+        )
+        _publish_release(client, headers, kb_id, version="release-1")
+
+        principal, api_key = _create_service_principal(
+            client,
+            headers,
+            service_id="service-dedup",
+            display_name="Service Dedup",
+        )
+        _create_grant(client, headers, kb_id, principal_id=principal["id"], release_selection_mode="latest_published")
+
+        response = client.post(
+            "/service/search",
+            headers={"X-Service-Api-Key": api_key},
+            json={"kb_id": kb_id, "query": "supported surface", "top_k": 2, "result_view": "referenced"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        assert [item["result_kind"] for item in payload["hits"]] == ["formal"]
+
+
+def test_service_search_treats_retained_missing_assets_as_stale():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+        kb_id = client.post("/kbs", headers=headers, json={"name": "Retained Missing KB", "description": "retain"}).json()["id"]
+
+        source_dir = "library/retained-missing"
+        source, evidence = _upload_source_and_build_evidence(
+            client,
+            headers,
+            kb_id,
+            source_dir=source_dir,
+            file_name="retained.txt",
+            content=b"Retained missing evidence should remain stale, not source_missing.",
+            missing_policy="retain_index_until_confirmed",
+        )
+        _create_manual_item(
+            client,
+            headers,
+            kb_id,
+            title="Retained missing fact",
+            statement="Retained missing evidence should remain stale, not source_missing.",
+            item_type="fact",
+            payload={"fact": "Retained missing evidence should remain stale, not source_missing."},
+            evidence_unit_ids=[evidence[0]["id"]],
+        )
+        _publish_release(client, headers, kb_id, version="release-1")
+        principal, api_key = _create_service_principal(
+            client,
+            headers,
+            service_id="service-retained-missing",
+            display_name="Service Retained Missing",
+        )
+        _create_grant(client, headers, kb_id, principal_id=principal["id"], release_selection_mode="latest_published")
+
+        missing_path = warehouse_app_path(f"{source_dir}/retained.txt")
+        from pathlib import Path
+        from knowledge.core.settings import get_settings
+
+        root = Path(get_settings().warehouse_mock_root) / account.address.lower() / missing_path.lstrip("/")
+        root.unlink()
+        rescan = client.post(f"/kbs/{kb_id}/sources/{source['id']}/scan", headers=headers)
+        rescan.raise_for_status()
+
+        assets = client.get(f"/kbs/{kb_id}/assets", headers=headers, params={"source_id": source["id"]})
+        assets.raise_for_status()
+        assert assets.json()[0]["availability_status"] == "missing_unconfirmed"
+
+        search = client.post(
+            "/service/search/formal",
+            headers={"X-Service-Api-Key": api_key},
+            json={"kb_id": kb_id, "query": "remain stale", "result_view": "audit"},
+        )
+        search.raise_for_status()
+        payload = search.json()
+        assert payload["hits"][0]["content_health_status"] == "stale"
+
+        exclude_missing = client.post(
+            "/service/search/evidence",
+            headers={"X-Service-Api-Key": api_key},
+            json={"kb_id": kb_id, "query": "retain evidence", "availability_mode": "exclude_source_missing"},
+        )
+        exclude_missing.raise_for_status()
+        assert exclude_missing.json()["hits"]
+        assert exclude_missing.json()["hits"][0]["content_health_status"] == "stale"
+
+
 def test_service_search_respects_latest_published_and_pinned_release_selection():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Grant Release Search KB", "description": "grant-release"}).json()["id"]
 
         _source, evidence = _upload_source_and_build_evidence(

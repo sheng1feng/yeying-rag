@@ -16,7 +16,7 @@ def utcnow() -> datetime:
 
 SOURCE_SYNC_STATUSES = ("pending_sync", "syncing", "synced", "failed", "source_missing", "disabled")
 SOURCE_MISSING_POLICIES = ("mark_missing", "retain_index_until_confirmed")
-SOURCE_ASSET_AVAILABILITY_STATUSES = ("discovered", "available", "changed", "missing", "ignored")
+SOURCE_ASSET_AVAILABILITY_STATUSES = ("discovered", "available", "changed", "missing", "missing_unconfirmed", "ignored")
 EVIDENCE_VECTOR_STATUSES = ("pending", "indexed", "failed")
 KNOWLEDGE_ITEM_ORIGIN_TYPES = ("extracted", "manual", "manual_from_extracted", "merged")
 KNOWLEDGE_ITEM_CANDIDATE_REVIEW_STATUSES = ("pending_review", "accepted", "rejected", "merged")
@@ -28,6 +28,8 @@ SERVICE_PRINCIPAL_STATUSES = ("active", "disabled", "revoked")
 SERVICE_GRANT_STATUSES = ("active", "expired", "revoked", "suspended")
 SERVICE_GRANT_RELEASE_SELECTION_MODES = ("latest_published", "pinned_release")
 RETRIEVAL_QUERY_MODES = ("formal_first", "formal_only", "evidence_only", "audit", "search_lab_compare")
+WAREHOUSE_ACCESS_CREDENTIAL_KINDS = ("read", "read_write")
+WAREHOUSE_ACCESS_CREDENTIAL_STATUSES = ("active", "invalid", "revoked_local")
 
 
 class WalletUser(Base):
@@ -86,6 +88,7 @@ class SourceBinding(Base):
     source_type: Mapped[str] = mapped_column(String(32), default="warehouse", nullable=False)
     source_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     scope_type: Mapped[str] = mapped_column(String(16), default="file", nullable=False)
+    credential_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_imported_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
@@ -212,59 +215,27 @@ class UploadRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
-class WarehouseCredential(Base):
-    __tablename__ = "warehouse_credentials"
-
-    owner_wallet_address: Mapped[str] = mapped_column(String(64), primary_key=True)
-    encrypted_access_token: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
-    access_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    refresh_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    warehouse_base_url: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-
-class WarehouseUcanBootstrap(Base):
-    __tablename__ = "warehouse_ucan_bootstraps"
+class WarehouseAccessCredential(Base):
+    __tablename__ = "warehouse_access_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_wallet_address",
+            "credential_kind",
+            "key_id",
+            "root_path",
+            name="uq_warehouse_access_credential_owner_kind_key_root",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     owner_wallet_address: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    nonce: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    message: Mapped[str] = mapped_column(Text, nullable=False)
-    audience: Mapped[str] = mapped_column(String(255), nullable=False)
-    cap_json: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
-    root_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    consumed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-
-
-class WarehouseUcanCredential(Base):
-    __tablename__ = "warehouse_ucan_credentials"
-
-    owner_wallet_address: Mapped[str] = mapped_column(String(64), primary_key=True)
-    encrypted_session_private_key: Mapped[str] = mapped_column(Text, nullable=False)
-    session_did: Mapped[str] = mapped_column(String(255), nullable=False)
-    audience: Mapped[str] = mapped_column(String(255), nullable=False)
-    cap_json: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
-    root_proof_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    root_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-
-class WarehouseAppUcanCredential(Base):
-    __tablename__ = "warehouse_app_ucan_credentials"
-
-    owner_wallet_address: Mapped[str] = mapped_column(String(64), primary_key=True)
-    app_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    encrypted_session_private_key: Mapped[str] = mapped_column(Text, nullable=False)
-    session_did: Mapped[str] = mapped_column(String(255), nullable=False)
-    audience: Mapped[str] = mapped_column(String(255), nullable=False)
-    cap_json: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
-    root_proof_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    root_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    credential_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    key_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    encrypted_key_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    root_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

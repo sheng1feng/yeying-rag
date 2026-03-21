@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from knowledge.models import EvidenceUnit, KnowledgeItemCandidate, Source, SourceAsset
+from knowledge.models import EvidenceUnit, KnowledgeBase, KnowledgeItemCandidate, Source, SourceAsset
 from knowledge.services.item_contracts import ITEM_CONTRACT_VERSION
 from knowledge.services.knowledge_items import KnowledgeItemValidationService
 
@@ -25,7 +25,8 @@ class CandidateExtractionService:
     def __init__(self, validation_service: KnowledgeItemValidationService | None = None) -> None:
         self.validation_service = validation_service or KnowledgeItemValidationService()
 
-    def generate_for_asset(self, db: Session, kb_id: int, asset_id: int) -> CandidateGenerationStats:
+    def generate_for_asset(self, db: Session, wallet_address: str, kb_id: int, asset_id: int) -> CandidateGenerationStats:
+        self._get_owned_kb_or_404(db, wallet_address, kb_id)
         asset = db.get(SourceAsset, asset_id)
         if asset is None or asset.kb_id != kb_id:
             raise LookupError("asset not found")
@@ -39,7 +40,8 @@ class CandidateExtractionService:
         )
         return self._generate_from_evidence(db, kb_id, evidence_units)
 
-    def generate_for_source(self, db: Session, kb_id: int, source_id: int) -> CandidateGenerationStats:
+    def generate_for_source(self, db: Session, wallet_address: str, kb_id: int, source_id: int) -> CandidateGenerationStats:
+        self._get_owned_kb_or_404(db, wallet_address, kb_id)
         source = db.get(Source, source_id)
         if source is None or source.kb_id != kb_id:
             raise LookupError("source not found")
@@ -100,6 +102,13 @@ class CandidateExtractionService:
         for candidate in stats.candidates:
             db.refresh(candidate)
         return stats
+
+    @staticmethod
+    def _get_owned_kb_or_404(db: Session, wallet_address: str, kb_id: int) -> KnowledgeBase:
+        kb = db.get(KnowledgeBase, kb_id)
+        if kb is None or kb.owner_wallet_address != wallet_address:
+            raise LookupError("knowledge base not found")
+        return kb
 
     def _infer_item_type_and_payload(self, evidence: EvidenceUnit) -> tuple[str, dict]:
         text = (evidence.text or "").strip()

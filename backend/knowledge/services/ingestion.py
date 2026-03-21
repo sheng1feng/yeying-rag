@@ -13,8 +13,8 @@ from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
 from knowledge.services.vector_store import build_vector_store
 from knowledge.services.warehouse import WarehouseGateway, WarehouseFileEntry, build_warehouse_gateway
+from knowledge.services.warehouse_access import WarehouseAccessService
 from knowledge.services.warehouse_scope import warehouse_app_root
-from knowledge.services.warehouse_session import WarehouseSessionService
 from knowledge.utils.time import utc_now
 import uuid
 
@@ -37,7 +37,7 @@ class IngestionService:
         self.parser = DocumentParser()
         self.chunker = DocumentChunker()
         self.vector_store = build_vector_store()
-        self.warehouse_session_service = WarehouseSessionService()
+        self.warehouse_access_service = WarehouseAccessService(warehouse_gateway=self.warehouse_gateway)
 
     def create_task(self, db: Session, wallet_address: str, kb_id: int, task_type: str, source_paths: list[str]) -> ImportTask:
         task = ImportTask(
@@ -96,7 +96,7 @@ class IngestionService:
                     task.heartbeat_at = utc_now()
                     db.commit()
                     try:
-                        entries = self._iter_files(db, task.owner_wallet_address, source_path)
+                        entries = self._iter_files(db, task, source_path)
                     except Exception as exc:  # noqa: BLE001
                         failed_files += 1
                         self._record_task_item(
@@ -205,9 +205,16 @@ class IngestionService:
         self._delete_document_state(db, document)
         db.delete(document)
 
-    def _iter_files(self, db: Session, wallet_address: str, source_path: str) -> list[WarehouseFileEntry]:
-        access_token = self._get_access_token_for_path_if_needed(db, wallet_address, source_path)
-        entries = self.warehouse_gateway.browse(wallet_address, source_path, access_token=access_token)
+    def _iter_files(self, db: Session, task: ImportTask, source_path: str) -> list[WarehouseFileEntry]:
+        resolved = self._resolve_read_access_for_task_path(db, task, source_path)
+        try:
+            entries = self.warehouse_gateway.browse(task.owner_wallet_address, source_path, auth=resolved.auth)
+            self.warehouse_access_service.mark_access_success(resolved)
+        except Exception as exc:  # noqa: BLE001
+            if self.warehouse_access_service.is_auth_error(exc):
+                self.warehouse_access_service.mark_access_invalid(resolved)
+                db.commit()
+            raise
         if len(entries) == 1 and entries[0].path == source_path and entries[0].entry_type == "file":
             return entries
         files: list[WarehouseFileEntry] = []
@@ -216,7 +223,7 @@ class IngestionService:
                 files.append(entry)
                 continue
             if entry.entry_type == "directory":
-                files.extend(self._iter_files(db, wallet_address, entry.path))
+                files.extend(self._iter_files(db, task, entry.path))
         return files
 
     @staticmethod
@@ -225,35 +232,7 @@ class IngestionService:
         return normalized.rstrip("/") or "/"
 
     def _find_related_binding(self, db: Session, kb_id: int, source_path: str) -> SourceBinding | None:
-        normalized_source_path = self._normalize_source_path(source_path)
-        bindings = list(
-            db.scalars(
-                select(SourceBinding)
-                .where(SourceBinding.kb_id == kb_id)
-                .where(SourceBinding.enabled.is_(True))
-            ).all()
-        )
-        best_binding: SourceBinding | None = None
-        best_priority: tuple[int, int] | None = None
-        for binding in bindings:
-            binding_path = self._normalize_source_path(binding.source_path)
-            scope_type = str(binding.scope_type or "file").strip().lower()
-            priority: tuple[int, int] | None = None
-            if scope_type == "directory":
-                if normalized_source_path == binding_path:
-                    priority = (2, len(binding_path))
-                elif binding_path != "/" and normalized_source_path.startswith(f"{binding_path}/"):
-                    priority = (1, len(binding_path))
-                elif binding_path == "/":
-                    priority = (1, 1)
-            elif normalized_source_path == binding_path:
-                priority = (3, len(binding_path))
-            if priority is None:
-                continue
-            if best_priority is None or priority > best_priority:
-                best_binding = binding
-                best_priority = priority
-        return best_binding
+        return self.warehouse_access_service.find_best_binding_for_path(db, kb_id, source_path)
 
     def _list_documents_for_delete(self, db: Session, task: ImportTask) -> list[ImportedDocument]:
         normalized_source_paths = [self._normalize_source_path(path) for path in task.source_paths if str(path or "").strip()]
@@ -325,8 +304,15 @@ class IngestionService:
             )
             return 0, "skipped", has_version_hint
 
-        access_token = self._get_access_token_for_path_if_needed(db, task.owner_wallet_address, file_entry.path)
-        content = self.warehouse_gateway.read_file(task.owner_wallet_address, file_entry.path, access_token=access_token)
+        resolved = self._resolve_read_access_for_task_path(db, task, file_entry.path)
+        try:
+            content = self.warehouse_gateway.read_file(task.owner_wallet_address, file_entry.path, auth=resolved.auth)
+            self.warehouse_access_service.mark_access_success(resolved)
+        except Exception as exc:  # noqa: BLE001
+            if self.warehouse_access_service.is_auth_error(exc):
+                self.warehouse_access_service.mark_access_invalid(resolved)
+                db.commit()
+            raise
         parsed_text = self.parser.parse(file_entry.name, content)
         if not parsed_text.strip():
             raise ValueError("parsed text is empty")
@@ -418,7 +404,7 @@ class IngestionService:
 
         document.chunk_count = created
         document.last_indexed_at = utc_now()
-        binding = self._find_related_binding(db, kb.id, file_entry.path)
+        binding = resolved.binding or self._find_related_binding(db, kb.id, file_entry.path)
         if binding is not None:
             binding.last_imported_at = utc_now()
         self._record_task_item(
@@ -465,13 +451,32 @@ class IngestionService:
             "embedding_model": self.settings.embedding_model,
         }
 
-    def _get_access_token_if_needed(self, db: Session, wallet_address: str) -> str | None:
-        return self._get_access_token_for_path_if_needed(db, wallet_address, warehouse_app_root())
+    @staticmethod
+    def _preferred_binding_ids(task: ImportTask) -> list[int] | None:
+        stats = task.stats_json or {}
+        raw_ids = stats.get("binding_ids") or []
+        values = [int(item) for item in raw_ids if int(item) > 0]
+        return values or None
 
-    def _get_access_token_for_path_if_needed(self, db: Session, wallet_address: str, path: str) -> str | None:
-        if self.settings.warehouse_gateway_mode == "bound_token":
-            return self.warehouse_session_service.get_access_token_for_path(db, wallet_address, path)
-        return None
+    @staticmethod
+    def _explicit_credential_id(task: ImportTask) -> int | None:
+        stats = task.stats_json or {}
+        raw_value = stats.get("explicit_credential_id")
+        if raw_value in {None, ""}:
+            return None
+        value = int(raw_value)
+        return value if value > 0 else None
+
+    def _resolve_read_access_for_task_path(self, db: Session, task: ImportTask, path: str):
+        return self.warehouse_access_service.resolve_path_read_access(
+            db,
+            task.owner_wallet_address,
+            task.kb_id,
+            path,
+            preferred_binding_ids=self._preferred_binding_ids(task),
+            explicit_credential_id=self._explicit_credential_id(task),
+            allow_write_fallback=True,
+        )
 
     @staticmethod
     def _duration_ms(started_at: float) -> int:

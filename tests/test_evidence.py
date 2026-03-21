@@ -7,6 +7,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.core.settings import get_settings
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path
@@ -52,6 +54,7 @@ def test_build_evidence_for_source_creates_evidence_units_with_locators():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Evidence KB", "description": "evidence"}).json()["id"]
 
         markdown_upload = client.post(
@@ -102,6 +105,7 @@ def test_rebuild_evidence_for_asset_replaces_existing_units_after_change():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Evidence Rebuild KB", "description": "rebuild"}).json()["id"]
 
         upload = client.post(
@@ -147,6 +151,7 @@ def test_source_build_skips_missing_assets_and_explicit_missing_asset_build_fail
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Evidence Missing KB", "description": "missing"}).json()["id"]
 
         upload_a = client.post(

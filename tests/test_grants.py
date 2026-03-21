@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -24,7 +24,7 @@ def _login(client: TestClient, account) -> str:
 
 
 def _iso_utc(dt: datetime) -> str:
-    return dt.astimezone(UTC).replace(tzinfo=None).isoformat()
+    return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 def _create_manual_item(
@@ -276,7 +276,7 @@ def test_service_grants_support_latest_published_pinned_release_and_lifecycle_st
             kb_id,
             service_principal_id=expired_principal["id"],
             release_selection_mode="latest_published",
-            expires_at=_iso_utc(datetime.now(UTC) - timedelta(days=1)),
+            expires_at=_iso_utc(datetime.now(timezone.utc) - timedelta(days=1)),
         )
 
         listed = client.get(f"/kbs/{kb_id}/grants", headers=headers)
@@ -386,3 +386,29 @@ def test_pinned_release_remains_stable_after_current_release_changes():
         assert any(item["kb_id"] == kb_id and item["pinned_release_id"] == release_1_id for item in grants_payload)
         kbs_payload = service_kbs.json()
         assert any(item["kb_id"] == kb_id for item in kbs_payload)
+
+
+def test_service_grant_rejects_invalid_default_result_mode():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        kb_id = client.post("/kbs", headers=headers, json={"name": "Invalid Grant KB", "description": "invalid-grant"}).json()["id"]
+        principal, _raw_api_key = _create_service_principal(
+            client,
+            headers,
+            service_id=f"svc-{uuid4().hex[:8]}",
+            display_name="Invalid Grant Service",
+        )
+
+        created = client.post(
+            f"/kbs/{kb_id}/grants",
+            headers=headers,
+            json={
+                "service_principal_id": principal["id"],
+                "release_selection_mode": "latest_published",
+                "default_result_mode": "verbose",
+            },
+        )
+        assert created.status_code == 400
+        assert "default_result_mode" in created.json()["detail"]

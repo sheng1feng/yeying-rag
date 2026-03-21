@@ -7,6 +7,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.core.settings import get_settings
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path
@@ -34,6 +36,7 @@ def test_source_registration_and_scan_discovers_assets():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Source KB", "description": "sources"}).json()
         kb_id = kb["id"]
@@ -95,6 +98,7 @@ def test_source_registration_enforces_app_only_scope_and_update():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb = client.post("/kbs", headers=headers, json={"name": "Scope KB", "description": "scope"}).json()
         kb_id = kb["id"]
 
@@ -130,6 +134,7 @@ def test_source_scan_marks_changed_and_missing_assets():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb = client.post("/kbs", headers=headers, json={"name": "Change KB", "description": "change"}).json()
         kb_id = kb["id"]
 
@@ -191,6 +196,7 @@ def test_source_scan_marks_source_missing_when_root_removed():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb = client.post("/kbs", headers=headers, json={"name": "Missing Root KB", "description": "missing-root"}).json()
         kb_id = kb["id"]
 

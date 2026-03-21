@@ -46,16 +46,13 @@
 - 读取对象是“已发布正式知识项 + 证据兜底”，而不是旧 retrieval/context 块
 - 结果明确带 `content_health_status` / `source_health_summary`
 - 读取哪一个 release 由 `ServiceGrant.release_selection_mode` 决定
-- `trace.trace_id`
-- `debug`
 
 说明：
 
+- `POST /service/search*` 当前稳定返回面以 `release / grant / hits` 为主，不额外返回 `trace/debug` 顶层对象
+- 如果请求未显式传 `result_view`，会回退到 `ServiceGrant.default_result_mode`
 - `memory_namespace` 是由上游应用生成的 opaque key，用于隔离不同机器人/工作流的短期记忆
 - `knowledge` 不维护 bot 对象，只消费该 namespace 做短期记忆隔离
-- `trace.trace_id` 用于串联 retrieval 响应、后续 `POST /memory/ingest` 事件，以及运维排障查询
-- `trace.applied_policy` 表示实际生效的 retrieval policy，而不是简单回显请求参数
-- `debug` 仅在请求显式开启时返回；它用于解释过滤条件、作用域限制、空结果原因、budget 裁剪和 provider 模式，不属于稳定顶层返回面
 
 ### 3. Service Search APIs
 
@@ -73,6 +70,7 @@
 - `POST /service/search/evidence`：只返回证据项，适合调试或未形成正式知识项的场景
 - 所有服务搜索都要求服务先通过 `ServicePrincipal` 证明身份，再由 `ServiceGrant` 决定可读 KB 与 release 选择策略
 - 所有服务搜索结果都显式带 `content_health_status` / `source_health_summary`
+- `formal_first` 会排除已经支撑 formal 命中的证据，避免 formal / evidence 重复返回同一条证据
 
 ### 3.1 绑定源驱动的任务接口
 
@@ -112,8 +110,8 @@
 
 说明：
 
-- `POST /memory/ingest` 推荐透传上一次 retrieval 响应中的 `trace_id`
-- `GET /memory/ingestions` 可按 `trace_id` 过滤，用于排查 retrieval → memory ingest 链路
+- `POST /memory/ingest` 支持由调用方自行透传 `trace_id`
+- `GET /memory/ingestions` 可按 `trace_id` 过滤，用于排查调用方自己的 retrieval → memory ingest 链路
 
 示例：
 
@@ -138,10 +136,12 @@
 
 ## Warehouse 相关说明
 
-- `knowledge` 前台会自动尝试绑定当前 `Warehouse App` 目录
+- 当前控制台主流程使用手工导入的读凭证 / 写凭证访问 `warehouse`
 - 默认 app 标识为 `knowledge.yeying.pub`，主路径为 `/apps/knowledge.yeying.pub/`
 - 上传、浏览、绑定、导入都只允许发生在该 app 目录内
-- 默认鉴权模式为 app UCAN；后端仍保留 JWT 绑定能力作为兼容兜底
+- 旧 `/warehouse/auth/*` JWT / UCAN 绑定接口已经从当前仓库删除
+- 控制面接口参考 `docs/control-plane-api.md`
+- 读写凭证使用方式参考 `docs/warehouse-credential-usage.md`
 
 ## 稳定性建议
 

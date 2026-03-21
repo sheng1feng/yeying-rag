@@ -37,7 +37,13 @@ class SourceSyncService:
         db.refresh(source)
 
         try:
-            snapshots = self.asset_inventory_service.list_asset_snapshots(db, wallet_address, source.source_path, source.scope_type)
+            snapshots = self.asset_inventory_service.list_asset_snapshots(
+                db,
+                wallet_address,
+                source.source_path,
+                source.scope_type,
+                kb_id=source.kb_id,
+            )
         except SourcePathMissingError:
             return self._mark_source_missing(db, source)
         except SourceScopeMismatchError:
@@ -88,7 +94,7 @@ class SourceSyncService:
         for asset_path, asset in existing_assets.items():
             if asset_path in seen_paths:
                 continue
-            asset.availability_status = "missing"
+            asset.availability_status = self._missing_availability_status(source)
             stats.missing_assets += 1
 
         source.last_seen_at = now
@@ -112,7 +118,7 @@ class SourceSyncService:
             ).all()
         )
         for asset in assets:
-            asset.availability_status = "missing"
+            asset.availability_status = SourceSyncService._missing_availability_status(source)
             stats.missing_assets += 1
         source.sync_status = "source_missing"
         source.last_seen_at = utc_now()
@@ -121,3 +127,9 @@ class SourceSyncService:
         db.refresh(source)
         stats.total_assets = len(assets)
         return source, stats
+
+    @staticmethod
+    def _missing_availability_status(source: Source) -> str:
+        if source.missing_policy == "retain_index_until_confirmed":
+            return "missing_unconfirmed"
+        return "missing"

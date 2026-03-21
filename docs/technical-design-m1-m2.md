@@ -129,19 +129,17 @@
 
 - 作用：将命中的 knowledge/memory 组装成可直接用于 prompt 的上下文段落
 
-### `POST /retrieval/generate-context`
+### 当前分支实际公开检索入口
 
-- 作用：统一的组合型 retrieval API
+- `POST /service/search`
+- `POST /service/search/formal`
+- `POST /service/search/evidence`
+- `POST /kbs/{kb_id}/search-lab/compare`
 
-### `POST /retrieval/context`
+说明：
 
-- 作用：中立的统一上下文入口
-- 特点：支持 `conversation`、`scope`、`policy`、`caller` 四类对象
-
-### `POST /bot/retrieval-context`
-
-- 作用：兼容旧的 bot-facing 调用方式
-- 特点：内部复用中立 context pipeline，不再承担 bot 对象管理语义
+- 当前分支已经移除旧的 `/retrieval/*`、`/retrieval/context`、`/bot/retrieval-context` 和 `/retrieval-context`
+- 当前公开叙事以“已发布正式知识项 + 证据兜底 + service grant” 为主
 
 ## 6. 关键对象模型建议
 
@@ -167,8 +165,8 @@
 
 ### 已新增的重点覆盖
 
-- 新分层 retrieval APIs 的联调
-- 中立 context 入口返回结构
+- `service search / search-lab / retrieval logs` 主链路联调
+- source / asset / evidence / item / release / grant 的关键读写路径
 - 记忆召回的 session / kb 作用域约束
 
 ### 后续应补
@@ -180,24 +178,17 @@
 
 ## 8. 迁移策略
 
-### 兼容演进
+### 当前迁移状态
 
-1. 保留旧 `POST /retrieval-context`
-2. 新 bot/chat 调用方优先接 `POST /retrieval/context`
-3. 需要精细编排的调用方接 `POST /retrieval/*`
-4. 旧控制台行为暂不强制迁移
-
-### 旧接口退场前提
-
-- 新统一入口稳定
-- 上游 bot/chat 已迁移
-- 评估结果证明新链路可替代旧链路
+1. legacy retrieval/context 路由已在当前分支下线
+2. 当前稳定入口是 `service search` 与 `search-lab`
+3. 兼容层保留在 `memory` 与旧 document ingest/task 流程，不再保留 retrieval 路由兼容壳
 
 ## 9. 风险控制
 
 - 不修改现有数据库结构，降低迁移风险
 - 旧接口复用新逻辑，避免双份实现漂移
-- debug 字段只在请求显式开启时返回详细信息
+- 当前 `service search` 不把 `trace/debug` 作为稳定返回契约
 - `source_scope` 先做精确路径过滤，避免引入虚假的权限承诺
 
 ## 10. 为什么这些抽象是值得的
@@ -212,11 +203,10 @@
 
 ### observability-first
 
-`trace_id`、`applied_policy`、`debug` 能直接回答“用了什么过滤器、为什么召回这些内容”，对 bot/chat 接入非常关键。
+当前分支的最小可解释面仍然是：
 
-这里的目标不是扩大稳定返回面，而是把解释能力限制在 `trace.*` 与显式开启的 `debug` 中：
+- `retrieval_logs`
+- `search-lab/compare`
+- `source-governance`
 
-- `trace_id` 用于串联 retrieval、memory ingest 与运维排障
-- `applied_policy` 表达实际生效策略，而不是机械回显请求
-- `debug` 负责解释过滤、scope、空结果、budget 裁剪与 provider 模式
-- legacy 接口继续复用统一编排逻辑，不再维护平行的调试语义
+如果后续恢复 `trace/debug`，应作为单独的公开契约迭代，而不是默认假设它已经存在。

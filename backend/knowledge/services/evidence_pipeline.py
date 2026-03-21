@@ -12,7 +12,7 @@ from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
 from knowledge.services.source_registry import SourceRegistryService
 from knowledge.services.warehouse import WarehouseGateway, build_warehouse_gateway
-from knowledge.services.warehouse_session import WarehouseSessionService
+from knowledge.services.warehouse_access import WarehouseAccessService
 from knowledge.services.vector_store import build_vector_store
 from knowledge.utils.time import utc_now
 
@@ -36,13 +36,13 @@ class EvidencePipelineService:
     def __init__(
         self,
         warehouse_gateway: WarehouseGateway | None = None,
-        warehouse_session_service: WarehouseSessionService | None = None,
+        warehouse_access_service: WarehouseAccessService | None = None,
         parser: DocumentParser | None = None,
         chunker: DocumentChunker | None = None,
     ) -> None:
         self.settings = get_settings()
         self.warehouse_gateway = warehouse_gateway or build_warehouse_gateway()
-        self.warehouse_session_service = warehouse_session_service or WarehouseSessionService()
+        self.warehouse_access_service = warehouse_access_service or WarehouseAccessService(warehouse_gateway=self.warehouse_gateway)
         self.parser = parser or DocumentParser()
         self.chunker = chunker or DocumentChunker()
         self.vector_store = build_vector_store()
@@ -128,8 +128,20 @@ class EvidencePipelineService:
         return stats
 
     def _build_for_single_asset(self, db: Session, wallet_address: str, kb: KnowledgeBase, asset: SourceAsset) -> int:
-        access_token = self._get_access_token_for_path_if_needed(db, wallet_address, asset.asset_path)
-        raw_content = self.warehouse_gateway.read_file(wallet_address, asset.asset_path, access_token=access_token)
+        resolved = self.warehouse_access_service.resolve_path_read_access(
+            db,
+            wallet_address,
+            kb.id,
+            asset.asset_path,
+            allow_write_fallback=True,
+        )
+        try:
+            raw_content = self.warehouse_gateway.read_file(wallet_address, asset.asset_path, auth=resolved.auth)
+            self.warehouse_access_service.mark_access_success(resolved)
+        except Exception as exc:
+            if self.warehouse_access_service.is_auth_error(exc):
+                self.warehouse_access_service.mark_access_invalid(resolved)
+            raise
         parsed_text = self.parser.parse(asset.asset_name, raw_content)
         if not parsed_text.strip():
             self._delete_existing_evidence(db, asset)
@@ -274,8 +286,3 @@ class EvidencePipelineService:
         if asset is None or asset.kb_id != kb_id:
             raise LookupError("asset not found")
         return asset
-
-    def _get_access_token_for_path_if_needed(self, db: Session, wallet_address: str, path: str) -> str | None:
-        if self.settings.warehouse_gateway_mode == "bound_token":
-            return self.warehouse_session_service.get_access_token_for_path(db, wallet_address, path)
-        return None

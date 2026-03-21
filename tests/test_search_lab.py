@@ -7,6 +7,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.core.settings import get_settings
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path
@@ -138,6 +140,7 @@ def test_service_search_writes_retrieval_logs_and_log_detail_is_auditable():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Log KB", "description": "log"}).json()["id"]
 
         _source, evidence, _upload = _upload_source_and_build_evidence(
@@ -200,6 +203,7 @@ def test_search_lab_compare_returns_formal_evidence_and_formal_first_views():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Compare KB", "description": "compare"}).json()["id"]
 
         _source, evidence, _upload = _upload_source_and_build_evidence(
@@ -245,6 +249,7 @@ def test_source_governance_exposes_source_missing_and_service_search_keeps_audit
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Governance KB", "description": "governance"}).json()["id"]
 
         source, evidence, upload = _upload_source_and_build_evidence(
@@ -301,6 +306,7 @@ def test_search_lab_compare_explains_stale_penalty_or_ranks_healthy_before_stale
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Stale KB", "description": "stale"}).json()["id"]
 
         source_a, evidence_a, upload_a = _upload_source_and_build_evidence(

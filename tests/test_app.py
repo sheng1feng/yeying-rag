@@ -5,6 +5,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.db.session import engine, session_scope
 from knowledge.main import app
 from knowledge.models import ImportTask
@@ -38,6 +40,7 @@ def test_end_to_end_auth_upload_import_search():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Personal KB", "description": "demo"}).json()
         kb_id = kb["id"]
@@ -116,6 +119,7 @@ def test_warehouse_app_only_paths_reject_personal_scope():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "App Only KB", "description": "app only"}).json()
         kb_id = kb["id"]
@@ -155,6 +159,7 @@ def test_memory_crud():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         created = client.post(
             "/memory/long-term",
@@ -199,6 +204,7 @@ def test_memory_ingestion_and_failure_ops():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Ops KB", "description": "ops"}).json()
         kb_id = kb["id"]
@@ -287,6 +293,7 @@ def test_worker_processes_pending_tasks_without_global_run_lease():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Queue KB", "description": "queue"}).json()
         kb_id = kb["id"]
@@ -316,6 +323,7 @@ def test_worker_reclaims_stale_running_task_and_reprocesses_it():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Lease KB", "description": "lease"}).json()
         created = client.post(
@@ -351,6 +359,7 @@ def test_cancel_pending_task_marks_canceled_without_processing():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cancel KB", "description": "cancel"}).json()
         created = client.post(
@@ -378,6 +387,7 @@ def test_cancel_running_task_marks_cancel_requested_in_db():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cancel Running KB", "description": "cancel-running"}).json()
         created = client.post(
@@ -406,6 +416,7 @@ def test_delete_kb_cleans_related_resources():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Delete KB", "description": "cleanup"}).json()
         kb_id = kb["id"]
@@ -491,6 +502,7 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post(
             "/kbs",
@@ -595,6 +607,72 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
         assert after_payload["chunks"][0]["embedding_model"] == "text-embedding-3-small"
 
 
+def test_kb_config_update_rebuilds_existing_source_evidence_with_latest_chunking():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+
+        kb = client.post(
+            "/kbs",
+            headers=headers,
+            json={
+                "name": "Evidence Config KB",
+                "description": "evidence-config",
+                "retrieval_config": {
+                    "chunk_size": 200,
+                    "chunk_overlap": 0,
+                    "retrieval_top_k": 4,
+                    "memory_top_k": 3,
+                    "embedding_model": "text-embedding-3-small",
+                },
+            },
+        )
+        assert kb.status_code == 200
+        kb_id = kb.json()["id"]
+
+        content = ("evidence rebuild after config update " * 60).encode()
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": _app_path("evidence-config")},
+            files={"file": ("evidence.txt", content, "text/plain")},
+        )
+        assert upload.status_code == 200
+
+        source = client.post(
+            f"/kbs/{kb_id}/sources",
+            headers=headers,
+            json={"source_type": "warehouse", "source_path": _app_path("evidence-config"), "scope_type": "directory"},
+        )
+        assert source.status_code == 200
+        source_id = source.json()["id"]
+
+        scan = client.post(f"/kbs/{kb_id}/sources/{source_id}/scan", headers=headers)
+        assert scan.status_code == 200
+        build = client.post(f"/kbs/{kb_id}/sources/{source_id}/build-evidence", headers=headers)
+        assert build.status_code == 200
+
+        before_evidence = client.get(f"/kbs/{kb_id}/evidence", headers=headers, params={"source_id": source_id})
+        assert before_evidence.status_code == 200
+        before_payload = before_evidence.json()
+        assert before_payload
+
+        updated = client.patch(
+            f"/kbs/{kb_id}",
+            headers=headers,
+            json={"retrieval_config": {"chunk_size": 60, "chunk_overlap": 0}},
+        )
+        assert updated.status_code == 200
+
+        after_evidence = client.get(f"/kbs/{kb_id}/evidence", headers=headers, params={"source_id": source_id})
+        assert after_evidence.status_code == 200
+        after_payload = after_evidence.json()
+        assert len(after_payload) > len(before_payload)
+        assert all(item["vector_status"] == "indexed" for item in after_payload)
+
+
 def test_ops_endpoints_require_auth():
     with TestClient(app) as client:
         overview = client.get("/ops/overview")
@@ -603,6 +681,7 @@ def test_ops_endpoints_require_auth():
         account = Account.create()
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         authed_overview = client.get("/ops/overview", headers=headers)
         assert authed_overview.status_code == 200
@@ -616,6 +695,7 @@ def test_delete_document_route_cleans_vector_store(monkeypatch):
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cleanup KB", "description": "cleanup"}).json()
         kb_id = kb["id"]
@@ -673,6 +753,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Directory KB", "description": "directory scope"}).json()
         kb_id = kb["id"]
@@ -737,6 +818,7 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Binding Tasks KB", "description": "binding tasks"}).json()
         kb_id = kb["id"]
@@ -820,6 +902,7 @@ def test_duplicate_active_task_reuses_existing_task():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Duplicate Task KB", "description": "duplicate"}).json()
         kb_id = kb["id"]
@@ -847,6 +930,7 @@ def test_binding_based_task_endpoints_validate_requested_binding_ids():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Binding Validation KB", "description": "binding validation"}).json()
         kb_id = kb["id"]
@@ -884,6 +968,7 @@ def test_binding_status_management_and_kb_workbench_summary():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Workbench KB", "description": "workbench"}).json()
         kb_id = kb["id"]

@@ -48,7 +48,7 @@ def generate_candidates_for_asset(
     db: Session = Depends(get_db),
 ) -> CandidateGenerationResponse:
     try:
-        result = candidate_extraction_service.generate_for_asset(db, kb_id, asset_id)
+        result = candidate_extraction_service.generate_for_asset(db, wallet_address, kb_id, asset_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ItemContractValidationError as exc:
@@ -70,7 +70,7 @@ def generate_candidates_for_source(
     db: Session = Depends(get_db),
 ) -> CandidateGenerationResponse:
     try:
-        result = candidate_extraction_service.generate_for_source(db, kb_id, source_id)
+        result = candidate_extraction_service.generate_for_source(db, wallet_address, kb_id, source_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ItemContractValidationError as exc:

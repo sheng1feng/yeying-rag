@@ -1,7 +1,55 @@
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
+
+
+class WarehouseCredentialCreateRequest(BaseModel):
+    key_id: str
+    key_secret: str
+    root_path: str
+
+
+class WarehouseCredentialSummary(BaseModel):
+    id: int
+    credential_kind: Literal["read", "read_write"]
+    key_id: str
+    key_secret_masked: str
+    root_path: str
+    status: str
+    last_verified_at: datetime | None = None
+    last_used_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WarehouseCredentialRevealResponse(BaseModel):
+    id: int
+    credential_kind: Literal["read", "read_write"]
+    key_id: str
+    key_secret: str
+
+
+class WarehouseWriteCredentialResponse(BaseModel):
+    configured: bool
+    credential: WarehouseCredentialSummary | None = None
+
+
+class WarehouseStatusResponse(BaseModel):
+    wallet_address: str
+    credentials_ready: bool = False
+    read_credentials_count: int = 0
+    write_credential_id: int | None = None
+    write_credential_status: str | None = None
+    write_root_path: str | None = None
+    current_app_id: str | None = None
+    current_app_root: str | None = None
+    current_app_upload_dir: str | None = None
+    warehouse_base_url: str | None = None
 
 
 class WarehouseEntry(BaseModel):
@@ -15,12 +63,15 @@ class WarehouseEntry(BaseModel):
 class WarehouseBrowseResponse(BaseModel):
     wallet_address: str
     path: str
+    credential_id: int | None = None
+    credential_kind: str | None = None
     entries: list[WarehouseEntry]
 
 
 class SourceBindingCreateRequest(BaseModel):
     source_path: str
     scope_type: Literal["file", "directory"] = "file"
+    credential_id: int | None = None
 
 
 class SourceBindingUpdateRequest(BaseModel):
@@ -33,6 +84,12 @@ class SourceBindingResponse(BaseModel):
     source_type: str
     source_path: str
     scope_type: str
+    credential_id: int | None = None
+    credential_kind: str | None = None
+    credential_key_id: str | None = None
+    credential_key_secret_masked: str | None = None
+    credential_root_path: str | None = None
+    credential_status: str | None = None
     enabled: bool
     last_imported_at: datetime | None = None
     sync_status: str | None = None

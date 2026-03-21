@@ -9,6 +9,8 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
+from tests.helpers import configure_warehouse_credentials
+
 from knowledge.core.settings import get_settings
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path, warehouse_app_root
@@ -43,6 +45,7 @@ def test_source_registration_list_get_update_and_app_scope_validation():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb = client.post("/kbs", headers=headers, json={"name": "Source KB", "description": "source"}).json()
         kb_id = kb["id"]
 
@@ -105,6 +108,7 @@ def test_source_scan_discovers_assets_recursively_and_lists_them():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Scan KB", "description": "scan"}).json()["id"]
 
         upload_a = client.post(
@@ -151,6 +155,7 @@ def test_source_scan_marks_available_changed_and_missing_assets():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Asset Status KB", "description": "status"}).json()["id"]
 
         upload_a = client.post(
@@ -215,6 +220,7 @@ def test_source_scan_marks_source_missing_when_root_path_is_removed():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
         kb_id = client.post("/kbs", headers=headers, json={"name": "Missing Root KB", "description": "missing"}).json()["id"]
 
         upload = client.post(

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from knowledge.models import KBRelease, KnowledgeBase, ServiceGrant
 from knowledge.models.entities import SERVICE_GRANT_RELEASE_SELECTION_MODES, SERVICE_GRANT_STATUSES
+from knowledge.schemas.service_search import RESULT_VIEWS
 from knowledge.services.release_management import ReleaseManagementService
 from knowledge.services.service_principals import ServicePrincipalService
 from knowledge.utils.time import utc_now
@@ -53,7 +54,7 @@ class ServiceGrantService:
             grant_status=self._derive_grant_status(expires_at, requested_status="active"),
             release_selection_mode=normalized_mode,
             pinned_release_id=resolved_pinned_release_id,
-            default_result_mode=str(default_result_mode or "compact").strip() or "compact",
+            default_result_mode=self._normalize_default_result_mode(default_result_mode),
             expires_at=expires_at,
         )
         db.add(grant)
@@ -106,7 +107,7 @@ class ServiceGrantService:
             grant.release_selection_mode = normalized_mode
             grant.pinned_release_id = resolved_pinned_release_id
         if default_result_mode is not None:
-            grant.default_result_mode = str(default_result_mode or "").strip() or grant.default_result_mode
+            grant.default_result_mode = self._normalize_default_result_mode(default_result_mode)
         if expires_at is not None:
             grant.expires_at = expires_at
         if grant_status is not None:
@@ -183,6 +184,13 @@ class ServiceGrantService:
         if expires_at is not None and expires_at <= utc_now():
             return "expired"
         return "active"
+
+    @staticmethod
+    def _normalize_default_result_mode(default_result_mode: str | None) -> str:
+        normalized = str(default_result_mode or "compact").strip().lower() or "compact"
+        if normalized not in RESULT_VIEWS:
+            raise ValueError(f"default_result_mode must be one of: {', '.join(RESULT_VIEWS)}")
+        return normalized
 
     @staticmethod
     def _refresh_expired_grants(db: Session, grants: list[ServiceGrant]) -> None:

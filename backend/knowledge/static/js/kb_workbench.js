@@ -24,6 +24,9 @@ window.KnowledgeKBWorkbench = (() => {
             <div class="list-subtitle">
               ${binding.scope_type} · ${binding.enabled ? "enabled" : "disabled"} · 文档 ${formatNumber(binding.document_count || 0)} · Chunk ${formatNumber(binding.chunk_count || 0)}
             </div>
+            <div class="helper">
+              ${escapeHtml(binding.credential_key_id || "-")} · ${escapeHtml(binding.credential_root_path || "-")} · ${escapeHtml(binding.credential_status || "missing")}
+            </div>
             <div class="pill-row">
               <span class="pill ${syncTone(binding.sync_status)}">${escapeHtml(binding.sync_status || "pending_sync")}</span>
               <span class="muted">最近同步 ${binding.last_imported_at ? formatDate(binding.last_imported_at) : "未同步"}</span>
@@ -32,7 +35,7 @@ window.KnowledgeKBWorkbench = (() => {
             <div class="list-actions">
               <button class="ghost" data-action="import-binding" data-binding-id="${binding.id}">导入</button>
               <button class="ghost" data-action="reindex-binding" data-binding-id="${binding.id}">重建</button>
-              <button class="ghost" data-action="open-browse-path" data-path="${binding.source_path}">定位</button>
+              <button class="ghost" data-action="open-browse-path" data-path="${binding.source_path}" data-credential-id="${binding.credential_id || ""}">定位</button>
               <button class="secondary" data-action="${binding.enabled ? "disable-binding" : "enable-binding"}" data-binding-id="${binding.id}">
                 ${binding.enabled ? "停用" : "启用"}
               </button>

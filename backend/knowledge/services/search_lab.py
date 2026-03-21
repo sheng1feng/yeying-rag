@@ -31,6 +31,7 @@ class SearchLabService:
     ) -> tuple[KBRelease | None, ServiceSearchResponse, ServiceSearchResponse, ServiceSearchResponse, RetrievalLog]:
         kb = self._get_kb_or_404(db, wallet_address, kb_id)
         release = self._current_release(db, wallet_address, kb.id)
+        used_evidence_ids: set[int] = set()
 
         formal_hits = (
             self.service_search_service._search_formal(  # noqa: SLF001
@@ -41,6 +42,7 @@ class SearchLabService:
                 availability_mode=availability_mode,
                 top_k=top_k,
                 include_zero_scores=True,
+                used_evidence_ids=used_evidence_ids,
             )
             if release is not None
             else []
@@ -55,11 +57,6 @@ class SearchLabService:
             exclude_evidence_ids=set(),
             include_zero_scores=True,
         )
-        used_evidence_ids = {
-            summary.evidence_id
-            for hit in formal_hits
-            for summary in (hit.evidence_summaries or [])
-        }
         fallback_evidence_hits = self.service_search_service._search_evidence(  # noqa: SLF001
             db,
             kb_id=kb.id,
@@ -185,7 +182,7 @@ class SearchLabService:
                 "last_ingested_at": asset.last_ingested_at,
             }
             for asset in assets
-            if asset.availability_status in {"missing", "changed"}
+            if asset.availability_status in {"missing", "missing_unconfirmed", "changed"}
         ]
         missing_source_ids = {asset["source_id"] for asset in affected_assets if asset["availability_status"] == "missing"}
         sources_payload = []
@@ -211,10 +208,16 @@ class SearchLabService:
                 "sources_failed": sum(1 for source in sources if source.sync_status == "failed"),
                 "assets_total": len(assets),
                 "assets_missing": sum(1 for asset in assets if asset.availability_status == "missing"),
+                "assets_missing_unconfirmed": sum(1 for asset in assets if asset.availability_status == "missing_unconfirmed"),
                 "stale": sum(1 for asset in assets if asset.availability_status == "changed"),
                 "evidence_total": int(sum(evidence_counts.values())),
                 "evidence_missing_impacted": sum(
                     int(evidence_counts.get(asset.id, 0) or 0) for asset in assets if asset.availability_status == "missing"
+                ),
+                "evidence_missing_unconfirmed_impacted": sum(
+                    int(evidence_counts.get(asset.id, 0) or 0)
+                    for asset in assets
+                    if asset.availability_status == "missing_unconfirmed"
                 ),
                 "evidence_stale_impacted": sum(
                     int(evidence_counts.get(asset.id, 0) or 0) for asset in assets if asset.availability_status == "changed"

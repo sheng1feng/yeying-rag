@@ -6,11 +6,14 @@ from knowledge.schemas.future_domain import KBReleaseRead
 from knowledge.schemas.grants import ServiceGrantResolvedRead
 
 
+RESULT_VIEWS = ("compact", "referenced", "audit")
+
+
 class ServiceSearchRequest(BaseModel):
     kb_id: int
     query: str
     top_k: int = 5
-    result_view: str = "compact"
+    result_view: str | None = None
     availability_mode: str = "allow_all"
 
 
