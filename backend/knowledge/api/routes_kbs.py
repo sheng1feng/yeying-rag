@@ -16,17 +16,22 @@ from knowledge.models import (
     KnowledgeBase,
     LongTermMemory,
     MemoryIngestionEvent,
+    Source,
     SourceBinding,
 )
 from knowledge.schemas.kb import KBCreateRequest, KBResponse, KBStatsResponse, KBUpdateRequest, KBWorkbenchResponse
 from knowledge.services.bindings import BindingService
+from knowledge.services.evidence_pipeline import EvidencePipelineService
 from knowledge.services.ingestion import IngestionService
+from knowledge.services.source_sync import SourceSyncService
 
 
 router = APIRouter(prefix="/kbs", tags=["knowledge_bases"])
 settings = get_settings()
 ingestion_service = IngestionService()
 binding_service = BindingService()
+source_sync_service = SourceSyncService()
+evidence_pipeline_service = EvidencePipelineService()
 
 
 def _default_kb_config() -> dict:
@@ -74,6 +79,28 @@ def _schedule_reindex_if_needed(db: Session, wallet_address: str, kb_id: int) ->
         task_type="reindex",
         source_paths=list(dict.fromkeys(source_paths)),
     )
+
+
+def _rebuild_source_evidence_if_needed(db: Session, wallet_address: str, kb_id: int) -> None:
+    source_ids = list(
+        db.scalars(
+            select(Source.id)
+            .where(Source.kb_id == kb_id)
+            .where(Source.enabled.is_(True))
+            .order_by(Source.created_at.asc(), Source.id.asc())
+        ).all()
+    )
+    for source_id in source_ids:
+        try:
+            source_sync_service.scan_source(db, wallet_address, kb_id, source_id)
+            evidence_pipeline_service.build_for_source(db, wallet_address, kb_id, source_id)
+        except Exception:
+            db.rollback()
+            source = db.get(Source, source_id)
+            if source is None:
+                continue
+            source.sync_status = "failed"
+            db.commit()
 
 
 def _delete_kb_resources(db: Session, wallet_address: str, kb_id: int) -> None:
@@ -170,6 +197,7 @@ def update_kb(
     db.refresh(kb)
     if reindex_needed:
         _schedule_reindex_if_needed(db, wallet_address, kb.id)
+        _rebuild_source_evidence_if_needed(db, wallet_address, kb.id)
         db.refresh(kb)
     return kb
 

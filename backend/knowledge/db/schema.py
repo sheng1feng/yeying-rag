@@ -17,6 +17,10 @@ TASK_ITEM_COLUMNS: dict[str, str] = {
     "error_type": "VARCHAR(128)",
 }
 
+SOURCE_BINDING_COLUMNS: dict[str, str] = {
+    "credential_id": "INTEGER",
+}
+
 RUNTIME_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("import_tasks", "ix_import_tasks_status_created_at", "status, created_at"),
     ("import_tasks", "ix_import_tasks_owner_status_created_at", "owner_wallet_address, status, created_at"),
@@ -28,11 +32,14 @@ def ensure_runtime_schema(engine: Engine) -> None:
     with engine.begin() as connection:
         _ensure_columns(connection, inspector, "import_tasks", TASK_COLUMNS)
         _ensure_columns(connection, inspector, "import_task_items", TASK_ITEM_COLUMNS)
+        _ensure_columns(connection, inspector, "source_bindings", SOURCE_BINDING_COLUMNS)
         inspector = inspect(connection)
         _ensure_indexes(connection, inspector)
 
 
 def _ensure_columns(connection, inspector, table_name: str, columns: dict[str, str]) -> None:
+    if not inspector.has_table(table_name):
+        return
     existing = {column["name"] for column in inspector.get_columns(table_name)}
     for column_name, column_type in columns.items():
         if column_name in existing:
@@ -50,5 +57,7 @@ def _ensure_indexes(connection, inspector) -> None:
 
 def _iter_indexes(inspector):
     for table_name in ("import_tasks", "import_task_items"):
+        if not inspector.has_table(table_name):
+            continue
         for index in inspector.get_indexes(table_name):
             yield table_name, index

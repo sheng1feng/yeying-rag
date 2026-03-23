@@ -1,3 +1,13 @@
+const APP_CONFIG = window.__KNOWLEDGE_CONFIG__ || {};
+const DEFAULT_WAREHOUSE_APP_ID = APP_CONFIG.warehouse_app_id || "knowledge.yeying.pub";
+const DEFAULT_WAREHOUSE_APP_ROOT = APP_CONFIG.warehouse_app_root || `/apps/${DEFAULT_WAREHOUSE_APP_ID}`;
+const DEFAULT_WAREHOUSE_UPLOAD_DIR = APP_CONFIG.warehouse_upload_dir || `${DEFAULT_WAREHOUSE_APP_ROOT}/uploads`;
+const DEFAULT_WAREHOUSE_BASE_URL = APP_CONFIG.warehouse_base_url || "";
+const DEFAULT_WAREHOUSE_WEBDAV_PREFIX = APP_CONFIG.warehouse_webdav_prefix || "/dav";
+const WAREHOUSE_TEMP_TOKEN_KEY = "knowledge:warehouse_temp_token";
+const WAREHOUSE_TEMP_WALLET_KEY = "knowledge:warehouse_temp_wallet";
+const WAREHOUSE_TEMP_STAGE_KEY = "knowledge:warehouse_temp_stage";
+
 const state = {
   token: localStorage.getItem("knowledge_token") || "",
   wallet: localStorage.getItem("knowledge_wallet") || "",
@@ -9,8 +19,26 @@ const state = {
   selectedTaskItems: [],
   currentKBStats: null,
   currentKBWorkbench: null,
-  warehouseBound: false,
-  currentBrowsePath: "/personal",
+  warehouseReady: false,
+  warehouseAppId: DEFAULT_WAREHOUSE_APP_ID,
+  warehouseAppRoot: DEFAULT_WAREHOUSE_APP_ROOT,
+  warehouseUploadDir: DEFAULT_WAREHOUSE_UPLOAD_DIR,
+  warehouseBaseUrl: DEFAULT_WAREHOUSE_BASE_URL,
+  warehouseWebdavPrefix: DEFAULT_WAREHOUSE_WEBDAV_PREFIX,
+  currentBrowsePath: DEFAULT_WAREHOUSE_APP_ROOT,
+  warehouseTempToken: "",
+  warehouseTempWallet: "",
+  warehouseTempStage: "",
+  warehouseBootstrapMode: "",
+  warehouseBootstrapMessage: "",
+  warehouseBootstrapError: "",
+  warehouseBootstrapWriteKeyId: "",
+  warehouseBootstrapReadKeyId: "",
+  warehouseBootstrapTargetPath: "",
+  readCredentials: [],
+  writeCredential: null,
+  browseAccessSource: "",
+  revealedCredentialSecrets: {},
   kbs: [],
   bindings: [],
   documents: [],
@@ -19,10 +47,11 @@ const state = {
   longMemories: [],
   shortMemories: [],
   memoryIngestions: [],
+  searchLabCompare: null,
+  retrievalLogs: [],
+  sourceGovernance: null,
   warehouseEntries: [],
   warehousePreview: null,
-  lastSearchResults: [],
-  lastContextResult: null,
   opsOverview: null,
   opsStores: null,
   opsWorkers: [],
@@ -40,6 +69,76 @@ const TASK_POLL_INTERVAL_MS = 3000;
 function el(id) {
   return document.getElementById(id);
 }
+
+function bindEvent(id, eventName, handler) {
+  const node = el(id);
+  if (!node) return null;
+  node.addEventListener(eventName, handler);
+  return node;
+}
+
+function readSessionValue(key) {
+  try {
+    return sessionStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSessionValue(key, value) {
+  try {
+    if (value) {
+      sessionStorage.setItem(key, value);
+    } else {
+      sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore session storage failures.
+  }
+}
+
+function walletHelper() {
+  return window.KnowledgeWallet || null;
+}
+
+function warehouseBridgeHelper() {
+  return window.KnowledgeWarehouseBridge || null;
+}
+
+function detectedWalletName() {
+  const helper = walletHelper();
+  if (!helper?.hasWallet?.()) return "";
+  return String(helper.getWalletName?.() || "").trim();
+}
+
+async function refreshWalletEnvironment() {
+  const helper = walletHelper();
+  if (!helper?.discoverProvider) {
+    renderWalletSummary();
+    return;
+  }
+  try {
+    await helper.discoverProvider({ timeoutMs: 1200 });
+  } catch {
+    // Ignore wallet discovery errors during passive refresh.
+  }
+  renderWalletSummary();
+}
+
+function syncWarehouseTempSessionState() {
+  state.warehouseTempToken = readSessionValue(WAREHOUSE_TEMP_TOKEN_KEY);
+  state.warehouseTempWallet = readSessionValue(WAREHOUSE_TEMP_WALLET_KEY);
+  state.warehouseTempStage = readSessionValue(WAREHOUSE_TEMP_STAGE_KEY);
+}
+
+function persistWarehouseTempSession({ token = "", wallet = "", stage = "" } = {}) {
+  writeSessionValue(WAREHOUSE_TEMP_TOKEN_KEY, token);
+  writeSessionValue(WAREHOUSE_TEMP_WALLET_KEY, wallet);
+  writeSessionValue(WAREHOUSE_TEMP_STAGE_KEY, stage);
+  syncWarehouseTempSessionState();
+}
+
+syncWarehouseTempSessionState();
 
 function setText(id, value) {
   const node = el(id);
@@ -83,10 +182,144 @@ function shortenMiddle(value, start = 8, end = 6) {
   return `${text.slice(0, start)}...${text.slice(-end)}`;
 }
 
+function currentWarehouseAppRoot() {
+  return state.warehouseAppRoot || DEFAULT_WAREHOUSE_APP_ROOT;
+}
+
+function currentWarehouseUploadDir() {
+  return state.warehouseUploadDir || DEFAULT_WAREHOUSE_UPLOAD_DIR;
+}
+
+function currentWriteCredentialId() {
+  return Number(state.writeCredential?.id || 0) || null;
+}
+
+function currentBrowseAccessSource() {
+  return String(state.browseAccessSource || "");
+}
+
+function currentBrowseCredentialId() {
+  const source = currentBrowseAccessSource();
+  if (source === "write") {
+    return currentWriteCredentialId();
+  }
+  if (source.startsWith("read:")) {
+    const value = Number(source.split(":")[1] || 0);
+    return value > 0 ? value : null;
+  }
+  return null;
+}
+
+function isBrowseUsingWriteCredential() {
+  return currentBrowseAccessSource() === "write";
+}
+
+function bindingCredentialId() {
+  return Number(el("binding-credential-id")?.value || 0) || null;
+}
+
+function bindingCredential() {
+  const id = bindingCredentialId();
+  if (!id) return null;
+  return state.readCredentials.find((credential) => Number(credential.id) === id) || null;
+}
+
+function bindingScopeType() {
+  return String(el("binding-scope-type")?.value || "auto").trim().toLowerCase() || "auto";
+}
+
+function setBrowseAccessSource(source) {
+  state.browseAccessSource = String(source || "");
+  const browseSelect = el("warehouse-access-source");
+  if (browseSelect) {
+    browseSelect.value = state.browseAccessSource;
+  }
+}
+
+function syncWarehouseConfig(data = {}) {
+  state.warehouseAppId = data.current_app_id || state.warehouseAppId || DEFAULT_WAREHOUSE_APP_ID;
+  state.warehouseAppRoot = data.current_app_root || state.warehouseAppRoot || DEFAULT_WAREHOUSE_APP_ROOT;
+  state.warehouseUploadDir = data.current_app_upload_dir || state.warehouseUploadDir || DEFAULT_WAREHOUSE_UPLOAD_DIR;
+  state.warehouseBaseUrl = data.warehouse_base_url || state.warehouseBaseUrl || DEFAULT_WAREHOUSE_BASE_URL;
+  state.warehouseWebdavPrefix = data.warehouse_webdav_prefix || state.warehouseWebdavPrefix || DEFAULT_WAREHOUSE_WEBDAV_PREFIX;
+  if (!state.currentBrowsePath || state.currentBrowsePath === "/" || state.currentBrowsePath.startsWith("/personal")) {
+    state.currentBrowsePath = state.warehouseAppRoot;
+  }
+  const browseInput = el("browse-path");
+  if (browseInput && (!browseInput.value || browseInput.value.startsWith("/personal"))) {
+    browseInput.value = state.currentBrowsePath;
+  }
+  const uploadInput = el("target-dir");
+  if (uploadInput && (!uploadInput.value || uploadInput.value.startsWith("/personal"))) {
+    uploadInput.value = state.warehouseUploadDir;
+  }
+  const currentBrowsePath = el("current-browse-path");
+  if (currentBrowsePath && (!currentBrowsePath.textContent || currentBrowsePath.textContent.startsWith("/personal"))) {
+    currentBrowsePath.textContent = state.currentBrowsePath;
+  }
+}
+
+function updateWarehouseCredentialSelectors() {
+  const bindingSelect = el("binding-credential-id");
+  if (bindingSelect) {
+    const previous = String(bindingSelect.value || "");
+    bindingSelect.innerHTML = [
+      `<option value="">选择读凭证</option>`,
+      ...state.readCredentials.map(
+        (credential) =>
+          `<option value="${credential.id}">${escapeHtml(`${credential.key_id} · ${credential.root_path} · ${credential.status}`)}</option>`,
+      ),
+    ].join("");
+    if (previous && state.readCredentials.some((credential) => String(credential.id) === previous)) {
+      bindingSelect.value = previous;
+    }
+  }
+
+  const browseSelect = el("warehouse-access-source");
+  if (browseSelect) {
+    const previous = String(state.browseAccessSource || browseSelect.value || "");
+    const options = [`<option value="">选择浏览凭证</option>`];
+    if (state.writeCredential) {
+      options.push(
+        `<option value="write">${escapeHtml(`写凭证 · ${state.writeCredential.key_id} · ${state.writeCredential.root_path} · ${state.writeCredential.status}`)}</option>`,
+      );
+    }
+    state.readCredentials.forEach((credential) => {
+      options.push(
+        `<option value="read:${credential.id}">${escapeHtml(`${credential.key_id} · ${credential.root_path} · ${credential.status}`)}</option>`,
+      );
+    });
+    browseSelect.innerHTML = options.join("");
+    const hasPrevious =
+      (previous === "write" && Boolean(state.writeCredential)) ||
+      state.readCredentials.some((credential) => `read:${credential.id}` === previous);
+    if (hasPrevious) {
+      browseSelect.value = previous;
+      state.browseAccessSource = previous;
+    } else if (state.writeCredential) {
+      browseSelect.value = "write";
+      state.browseAccessSource = "write";
+    } else if (state.readCredentials.length) {
+      browseSelect.value = `read:${state.readCredentials[0].id}`;
+      state.browseAccessSource = browseSelect.value;
+    } else {
+      browseSelect.value = "";
+      state.browseAccessSource = "";
+    }
+  }
+}
+
 function renderWalletSummary() {
   const wallet = String(state.wallet || "");
-  const status = !wallet ? "未登录" : state.warehouseBound ? "已登录 · 资产已就绪" : "已登录 · 等待资产连接";
-  const walletLabel = wallet ? shortenMiddle(wallet) : "未连接钱包";
+  const providerName = detectedWalletName();
+  const status = !wallet
+    ? providerName
+      ? `未登录 · 已检测到${providerName}`
+      : "未登录 · 未检测到钱包"
+    : state.warehouseReady
+      ? "已登录 · 凭证已就绪"
+      : "已登录 · 等待导入仓库凭证";
+  const walletLabel = wallet ? shortenMiddle(wallet) : providerName ? `${providerName} 已就绪` : "未连接钱包";
   setText("login-status", status);
   setText("pill-wallet", wallet ? `钱包：${shortenMiddle(wallet, 6, 4)}` : "钱包：未登录");
   const walletAddress = el("wallet-address");
@@ -342,6 +575,11 @@ function setOutput(data) {
   el("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
 }
 
+function setLoginProgress(message, extra = {}) {
+  const payload = Object.keys(extra).length ? { stage: message, ...extra } : { stage: message };
+  setOutput(payload);
+}
+
 function notify(type, message) {
   const container = el("toast-container");
   const toast = document.createElement("div");
@@ -394,6 +632,154 @@ function withFeedback(fn, successMessage = "") {
   };
 }
 
+function setWarehouseBootstrapState(stage, message = "", extra = {}) {
+  state.warehouseTempStage = stage || "";
+  state.warehouseBootstrapMessage = message || "";
+  state.warehouseBootstrapError = extra.error || "";
+  if (extra.mode !== undefined) state.warehouseBootstrapMode = extra.mode || "";
+  if (extra.targetPath !== undefined) state.warehouseBootstrapTargetPath = extra.targetPath || "";
+  if (extra.writeKeyId !== undefined) state.warehouseBootstrapWriteKeyId = extra.writeKeyId || "";
+  if (extra.readKeyId !== undefined) state.warehouseBootstrapReadKeyId = extra.readKeyId || "";
+  if (extra.wallet !== undefined) state.warehouseTempWallet = extra.wallet || "";
+  writeSessionValue(WAREHOUSE_TEMP_WALLET_KEY, state.warehouseTempWallet);
+  writeSessionValue(WAREHOUSE_TEMP_STAGE_KEY, state.warehouseTempStage);
+  renderWarehouseBootstrapStatus();
+  setOutput({
+    warehouse_stage: state.warehouseTempStage || "-",
+    warehouse_mode: state.warehouseBootstrapMode || "-",
+    warehouse_target_path: state.warehouseBootstrapTargetPath || "-",
+    message: state.warehouseBootstrapError || state.warehouseBootstrapMessage || message || "",
+    warehouse_base_url: state.warehouseBaseUrl || "-",
+    ...("wallet" in extra ? { warehouse_wallet: extra.wallet } : {}),
+    ...("writeKeyId" in extra ? { warehouse_write_key_id: extra.writeKeyId || "" } : {}),
+    ...("readKeyId" in extra ? { warehouse_read_key_id: extra.readKeyId || "" } : {}),
+  });
+}
+
+function clearWarehouseTempSession() {
+  persistWarehouseTempSession({ token: "", wallet: "", stage: "" });
+  state.warehouseBootstrapMode = "";
+  state.warehouseBootstrapMessage = "";
+  state.warehouseBootstrapError = "";
+  state.warehouseBootstrapWriteKeyId = "";
+  state.warehouseBootstrapReadKeyId = "";
+  state.warehouseBootstrapTargetPath = "";
+  renderWarehouseBootstrapStatus();
+  setOutput({ ok: true, message: "warehouse 临时会话已清理" });
+}
+
+function bootstrapTargetPathForMode(mode) {
+  return mode === "app_root_write" ? currentWarehouseAppRoot() : currentWarehouseUploadDir();
+}
+
+function bootstrapLabels(mode) {
+  if (mode === "app_root_write") {
+    return {
+      modeLabel: "app 根写凭证",
+      writeName: `knowledge-app-root-write-${Date.now().toString(36)}`,
+      writePermissions: ["read", "create", "update"],
+      createReadCredential: false,
+      targetPath: currentWarehouseAppRoot(),
+      mkcolPath: currentWarehouseAppRoot(),
+    };
+  }
+  return {
+    modeLabel: "uploads 读写凭证",
+    writeName: `knowledge-uploads-write-${Date.now().toString(36)}`,
+    writePermissions: ["read", "create", "update"],
+    readName: `knowledge-uploads-read-${Date.now().toString(36)}`,
+    readPermissions: ["read"],
+    createReadCredential: true,
+    targetPath: currentWarehouseUploadDir(),
+    mkcolPath: currentWarehouseUploadDir(),
+  };
+}
+
+async function bootstrapWarehouseCredentials(mode = "uploads_bundle") {
+  if (state.writeCredential) {
+    const confirmed = await confirmAction(
+      "覆盖当前写凭证",
+      "该操作会用 warehouse 临时授权生成的新写凭证覆盖当前写凭证配置。已有读凭证不会被删除。",
+    );
+    if (!confirmed) return;
+  }
+  const helper = walletHelper();
+  if (!helper) {
+    throw new Error("钱包适配层未加载");
+  }
+  const labels = bootstrapLabels(mode);
+  const targetPath = labels.targetPath;
+  state.warehouseBootstrapMode = mode;
+  state.warehouseBootstrapTargetPath = targetPath;
+  state.warehouseBootstrapError = "";
+  state.warehouseBootstrapMessage = "";
+  state.warehouseBootstrapWriteKeyId = "";
+  state.warehouseBootstrapReadKeyId = "";
+  renderWarehouseBootstrapStatus();
+
+  try {
+    setWarehouseBootstrapState("requesting_challenge", "正在向 knowledge 后端请求 warehouse challenge", {
+      mode,
+      targetPath,
+    });
+    const challenge = await api("/warehouse/bootstrap/challenge", {
+      method: "POST",
+    });
+    const provider = (await helper.discoverProvider?.({ timeoutMs: 1200 })) || helper.getWalletProvider?.();
+    if (!provider) {
+      throw new Error("未检测到钱包，请先安装或解锁夜莺钱包。");
+    }
+    const providerName = helper.getWalletName?.(provider) || "Web3 钱包";
+    setWarehouseBootstrapState("signing_challenge", "正在请求钱包签名 warehouse challenge", {
+      mode,
+      targetPath,
+      wallet: challenge.wallet_address,
+    });
+    const [wallet] = await helper.requestAccounts(provider, { timeoutMs: 15000 });
+    if (!wallet) {
+      throw new Error("未获取到可用钱包账户。");
+    }
+    const normalizedWallet = String(wallet).trim().toLowerCase();
+    const expectedWallet = String(state.wallet || challenge.wallet_address || "").trim().toLowerCase();
+    if (expectedWallet && normalizedWallet !== expectedWallet) {
+      throw new Error(`当前钱包账户 ${wallet} 与 knowledge 登录地址 ${state.wallet} 不一致。请先切回相同钱包地址。`);
+    }
+    const signature = await helper.signChallenge(provider, wallet, challenge.challenge, { timeoutMs: 20000 });
+
+    setWarehouseBootstrapState("initializing", "knowledge 后端正在代为完成 warehouse 初始化", {
+      mode,
+      targetPath,
+      wallet,
+    });
+    const result = await api("/warehouse/bootstrap/initialize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, signature }),
+    });
+
+    await Promise.all([refreshWarehouseStatus(), refreshWriteCredential(), refreshReadCredentials()]);
+    persistWarehouseTempSession({ token: "", wallet, stage: "ready" });
+    setWarehouseBootstrapState("ready", `${labels.modeLabel} 初始化完成`, {
+      mode: result.mode || mode,
+      targetPath: result.target_path || targetPath,
+      wallet,
+      writeKeyId: result.write_key_id || "",
+      readKeyId: result.read_key_id || "",
+    });
+    notify("success", `${labels.modeLabel} 初始化完成`);
+  } catch (error) {
+    const message = helper.formatWalletActionError?.(error, "warehouse 初始化失败，请稍后重试。") || String(error);
+    setWarehouseBootstrapState("failed", "", {
+      mode,
+      targetPath,
+      error: message,
+      writeKeyId: state.warehouseBootstrapWriteKeyId,
+      readKeyId: state.warehouseBootstrapReadKeyId,
+    });
+    throw new Error(message);
+  }
+}
+
 function setLoggedIn(wallet) {
   state.wallet = wallet;
   localStorage.setItem("knowledge_wallet", wallet);
@@ -414,7 +800,11 @@ function clearSession() {
   stopTaskPolling();
   state.token = "";
   state.wallet = "";
-  state.warehouseBound = false;
+  state.warehouseReady = false;
+  state.readCredentials = [];
+  state.writeCredential = null;
+  state.browseAccessSource = "";
+  state.revealedCredentialSecrets = {};
   state.selectedKB = null;
   state.selectedDocument = null;
   state.selectedTaskId = null;
@@ -434,19 +824,17 @@ function updateSelectedKBUI() {
   const kb = state.selectedKB;
   if (!kb) {
     el("selected-kb-name").textContent = "未选择";
-    el("selected-kb-desc").textContent = "请选择一个知识库后继续绑定、导入和检索。";
+    el("selected-kb-desc").textContent = "请选择一个知识库后继续来源治理、知识项管理与发布。";
     return;
   }
   el("selected-kb-name").textContent = `#${kb.id} ${kb.name}`;
   el("selected-kb-desc").textContent = kb.description || "无描述";
   el("task-kb-id").value = kb.id;
-  el("search-kb-id").value = kb.id;
-  el("context-kb-ids").value = String(kb.id);
-  el("memory-kb-id").value = kb.id;
+  if (el("memory-kb-id")) el("memory-kb-id").value = kb.id;
 }
 
-function setWarehouseBound(bound, expiresAt) {
-  state.warehouseBound = bound;
+function setWarehouseReady(ready) {
+  state.warehouseReady = ready;
   renderWalletSummary();
 }
 
@@ -463,9 +851,9 @@ function buildRecentActivities() {
   const activities = [];
 
   state.uploads.slice(0, 6).forEach((upload) => {
-    const actions = [{ label: "定位", action: "open-browse-path", path: upload.warehouse_target_path }];
+    const actions = [{ label: "定位", action: "open-browse-path", path: upload.warehouse_target_path, useWriteCredential: true }];
     if (state.selectedKB) {
-      actions.push({ label: "导入", action: "import-path", path: upload.warehouse_target_path });
+      actions.push({ label: "导入", action: "import-path", path: upload.warehouse_target_path, useWriteCredential: true });
     }
     activities.push({
       sortTs: toTimestamp(upload.created_at),
@@ -474,7 +862,7 @@ function buildRecentActivities() {
       title: upload.file_name,
       subtitle: upload.warehouse_target_path,
       time: upload.created_at,
-      detail: `${formatNumber(upload.size || 0)} bytes · 已写入 warehouse personal`,
+      detail: `${formatNumber(upload.size || 0)} bytes · 已写入 Knowledge App 目录`,
       status: "uploaded",
       tone: "success",
       actions,
@@ -570,6 +958,8 @@ function renderRecentActivity() {
                   const attrs = [
                     `data-action="${action.action}"`,
                     action.path ? `data-path="${escapeHtml(action.path)}"` : "",
+                    action.credentialId ? `data-credential-id="${action.credentialId}"` : "",
+                    action.useWriteCredential ? `data-use-write-credential="true"` : "",
                     action.taskId ? `data-task-id="${action.taskId}"` : "",
                     action.docId ? `data-doc-id="${action.docId}"` : "",
                     action.eventId ? `data-event-id="${action.eventId}"` : "",
@@ -750,17 +1140,21 @@ function renderWarehousePreview() {
 
 function pathFieldConfig(fieldId) {
   return {
-    "browse-path": { allowFiles: false, allowDirectories: true, personalOnly: false },
-    "target-dir": { allowFiles: false, allowDirectories: true, personalOnly: true },
-    "binding-path": { allowFiles: true, allowDirectories: true, personalOnly: false },
-    "task-source-path": { allowFiles: true, allowDirectories: true, personalOnly: false },
-  }[fieldId] || { allowFiles: true, allowDirectories: true, personalOnly: false };
+    "browse-path": { allowFiles: false, allowDirectories: true },
+    "target-dir": { allowFiles: false, allowDirectories: true },
+    "read-credential-root-path": { allowFiles: true, allowDirectories: true },
+    "write-credential-root-path": { allowFiles: true, allowDirectories: true },
+    "binding-path": { allowFiles: true, allowDirectories: true },
+    "task-source-path": { allowFiles: true, allowDirectories: true },
+  }[fieldId] || { allowFiles: true, allowDirectories: true };
 }
 
 function pathFieldLabel(fieldId) {
   return {
     "browse-path": "浏览路径",
     "target-dir": "上传目录",
+    "read-credential-root-path": "读凭证根路径",
+    "write-credential-root-path": "写凭证根路径",
     "binding-path": "绑定路径",
     "task-source-path": "任务源路径",
   }[fieldId] || "路径";
@@ -768,7 +1162,6 @@ function pathFieldLabel(fieldId) {
 
 function pathMatchesField(fieldId, path, entryType) {
   const config = pathFieldConfig(fieldId);
-  if (config.personalOnly && !String(path).startsWith("/personal")) return false;
   if (entryType === "file" && !config.allowFiles) return false;
   if (entryType === "directory" && !config.allowDirectories) return false;
   return true;
@@ -782,6 +1175,34 @@ function collectPathPickerSections(fieldId) {
       if (entry.entry_type === "directory") return true;
       return pathMatchesField(fieldId, entry.path, entry.entry_type);
     });
+}
+
+async function ensureBindingBrowseContext() {
+  const credential = bindingCredential();
+  if (!credential) {
+    throw new Error("请先选择读凭证，再选择绑定源路径");
+  }
+  const targetSource = `read:${credential.id}`;
+  const targetRoot = String(credential.root_path || "").trim();
+  if (!targetRoot) {
+    throw new Error("当前读凭证缺少 root_path");
+  }
+  const currentPath = String(state.currentBrowsePath || "").trim();
+  const browsingWrite = isBrowseUsingWriteCredential();
+  const browsingDifferentCredential = currentBrowseCredentialId() !== credential.id;
+  const outOfRoot = !currentPath || (currentPath !== targetRoot && !currentPath.startsWith(`${targetRoot}/`));
+
+  setBrowseAccessSource(targetSource);
+  if (browsingWrite || browsingDifferentCredential || outOfRoot || !state.warehouseEntries.length) {
+    await browseWarehouse(targetRoot, credential.id, false);
+  }
+}
+
+async function openPathPickerForField(fieldId) {
+  if (fieldId === "binding-path") {
+    await ensureBindingBrowseContext();
+  }
+  renderPathPicker(fieldId);
 }
 
 function renderPathPicker(fieldId) {
@@ -799,13 +1220,16 @@ function renderPathPicker(fieldId) {
     state.pathPickerCloseTimer = null;
   }
   if (contextEl) {
-    contextEl.textContent = `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前目录：${state.currentBrowsePath || "/"}`;
+    const credential = fieldId === "binding-path" ? bindingCredential() : null;
+    contextEl.textContent = credential
+      ? `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前使用读凭证 ${credential.key_id}，根目录：${credential.root_path}`
+      : `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前目录：${state.currentBrowsePath || "/"}`;
   }
   if (modeEl) {
     modeEl.innerHTML = `
       <span class="picker-chip ${config.allowDirectories ? "active" : ""}">可选目录</span>
       <span class="picker-chip ${config.allowFiles ? "active" : ""}">可选文件</span>
-      <span class="picker-chip ${config.personalOnly ? "active" : ""}">限制 personal</span>
+      <span class="picker-chip active">当前 App 目录</span>
     `;
   }
   const currentPath = state.currentBrowsePath || "/";
@@ -1134,29 +1558,58 @@ function renderDocumentDetail(detail = null) {
 }
 
 async function loginWithWallet() {
-  if (!window.ethereum) {
-    throw new Error("未检测到浏览器钱包");
+  const helper = walletHelper();
+  if (!helper) {
+    throw new Error("钱包适配层未加载");
   }
-  const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
-  const challenge = await api("/auth/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: wallet }),
-  });
-  const signature = await window.ethereum.request({
-    method: "personal_sign",
-    params: [challenge.message, wallet],
-  });
-  const token = await api("/auth/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: wallet, signature }),
-  });
-  state.token = token.access_token;
-  localStorage.setItem("knowledge_token", token.access_token);
-  setLoggedIn(token.wallet_address);
-  await refreshAll();
-  setOutput(token);
+  try {
+    setLoginProgress("正在检测钱包环境");
+    const provider = (await helper.discoverProvider?.({ timeoutMs: 1200 })) || helper.getWalletProvider?.();
+    if (!provider) {
+      throw new Error("未检测到钱包，请安装 MetaMask 或夜莺钱包");
+    }
+
+    const providerName = helper.getWalletName?.(provider) || "Web3 钱包";
+    setLoginProgress("正在请求钱包账户", { wallet_provider: providerName });
+    const [wallet] = await helper.requestAccounts(provider, { timeoutMs: 15000 });
+    if (!wallet) {
+      throw new Error("未获取到账户");
+    }
+
+    setLoginProgress("钱包账户已连接，正在获取 challenge", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const challenge = await api("/auth/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet_address: wallet }),
+    });
+
+    setLoginProgress("challenge 已获取，正在请求钱包签名", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const signature = await helper.signChallenge(provider, wallet, challenge.message, { timeoutMs: 20000 });
+
+    setLoginProgress("签名完成，正在校验登录", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const token = await api("/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet_address: wallet, signature }),
+    });
+    state.token = token.access_token;
+    localStorage.setItem("knowledge_token", token.access_token);
+    setLoggedIn(token.wallet_address);
+    await refreshAll();
+    setOutput(token);
+  } catch (error) {
+    const message = helper.formatWalletLoginError?.(error, "knowledge 登录失败，请稍后重试。") || String(error);
+    throw new Error(message);
+  }
 }
 
 async function logout() {
@@ -1166,88 +1619,277 @@ async function logout() {
   state.documents = [];
   state.tasks = [];
   state.uploads = [];
+  state.readCredentials = [];
+  state.writeCredential = null;
+  state.browseAccessSource = "";
+  state.revealedCredentialSecrets = {};
   state.longMemories = [];
   state.shortMemories = [];
   state.memoryIngestions = [];
+  state.searchLabCompare = null;
+  state.retrievalLogs = [];
+  state.sourceGovernance = null;
   state.warehouseEntries = [];
-  state.lastContextResult = null;
+  state.currentBrowsePath = DEFAULT_WAREHOUSE_APP_ROOT;
   state.opsFailures = [];
+  syncWarehouseConfig();
   renderAll();
 }
 
 async function refreshWarehouseStatus() {
-  const data = await api("/warehouse/auth/status");
-  setWarehouseBound(Boolean(data.jwt_bound || data.bound), data.access_expires_at);
+  const data = await api("/warehouse/status");
+  syncWarehouseConfig(data);
+  setWarehouseReady(Boolean(data.credentials_ready));
   return data;
+}
+
+async function refreshReadCredentials() {
+  state.readCredentials = await api("/warehouse/credentials/read");
+  updateWarehouseCredentialSelectors();
+  renderReadCredentials();
+}
+
+async function refreshWriteCredential() {
+  const payload = await api("/warehouse/credentials/write");
+  state.writeCredential = payload.configured ? payload.credential : null;
+  updateWarehouseCredentialSelectors();
+  renderWriteCredential();
+}
+
+function renderReadCredentials() {
+  const list = el("read-credential-list");
+  if (!list) return;
+  if (!state.readCredentials.length) {
+    list.innerHTML = `<div class="empty">还没有导入读凭证。</div>`;
+    return;
+  }
+  list.innerHTML = state.readCredentials
+    .map((credential) => {
+      const revealed = state.revealedCredentialSecrets[credential.id];
+      return `
+        <div class="list-item">
+          <div class="list-head">
+            <div class="list-title">${escapeHtml(credential.key_id)}</div>
+            <span class="pill ${credential.status === "active" ? "success" : "warning"}">${escapeHtml(credential.status)}</span>
+          </div>
+          <div class="list-subtitle">${escapeHtml(credential.root_path)}</div>
+          <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}</div>
+          <div class="list-actions">
+            <button class="ghost" data-action="reveal-read-credential" data-credential-id="${credential.id}">${revealed ? "重新显示" : "显示 sk"}</button>
+            <button class="secondary" data-action="use-read-credential" data-credential-id="${credential.id}">设为浏览/绑定</button>
+            <button class="danger" data-action="delete-read-credential" data-credential-id="${credential.id}">删除</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderWriteCredential() {
+  const list = el("write-credential-list");
+  if (!list) return;
+  if (!state.writeCredential) {
+    list.innerHTML = `<div class="empty">还没有配置写凭证。</div>`;
+    return;
+  }
+  const credential = state.writeCredential;
+  const revealed = state.revealedCredentialSecrets[credential.id];
+  list.innerHTML = `
+    <div class="list-item">
+      <div class="list-head">
+        <div class="list-title">${escapeHtml(credential.key_id)}</div>
+        <span class="pill ${credential.status === "active" ? "success" : "warning"}">${escapeHtml(credential.status)}</span>
+      </div>
+      <div class="list-subtitle">${escapeHtml(credential.root_path)}</div>
+      <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}</div>
+      <div class="list-actions">
+        <button class="ghost" data-action="reveal-write-credential">${revealed ? "重新显示" : "显示 sk"}</button>
+        <button class="secondary" data-action="use-write-credential">设为浏览凭证</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderWarehouseBootstrapStatus() {
+  const box = el("warehouse-bootstrap-status");
+  if (!box) return;
+  if (!state.warehouseBaseUrl) {
+    box.className = "empty";
+    box.textContent = "当前环境未配置 warehouse_base_url，无法使用临时初始化。";
+    return;
+  }
+  const connected = Boolean(state.warehouseTempWallet);
+  const stage = state.warehouseBootstrapMode
+    ? `${state.warehouseBootstrapMode === "uploads_bundle" ? "uploads 读写凭证" : "app 根写凭证"} · ${state.warehouseTempStage || state.warehouseBootstrapMode}`
+    : state.warehouseTempStage || (connected ? "authorized" : "idle");
+  const tone = state.warehouseBootstrapError ? "danger" : connected ? "success" : "warning";
+  const targetPath = state.warehouseBootstrapTargetPath || (state.warehouseBootstrapMode === "app_root_write" ? currentWarehouseAppRoot() : currentWarehouseUploadDir());
+  const message =
+    state.warehouseBootstrapError ||
+    state.warehouseBootstrapMessage ||
+    (connected ? "最近一次初始化已通过 knowledge 后端代理完成，可继续重试。": "尚未开始 warehouse 初始化。");
+  const details = [
+    `<div class="detail-list-item"><div class="detail-list-head"><strong>warehouse</strong><span class="pill ${tone}">${escapeHtml(stage)}</span></div><div class="helper">${escapeHtml(state.warehouseBaseUrl)}</div></div>`,
+    `<div class="detail-list-item"><div class="detail-list-head"><strong>目标路径</strong><span class="pill">${escapeHtml(targetPath)}</span></div><div class="helper">${escapeHtml(message)}</div></div>`,
+  ];
+  if (connected) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>最近使用钱包</strong><span class="pill success">${escapeHtml(shortenMiddle(state.warehouseTempWallet || "-", 10, 6) || "-")}</span></div><div class="helper">浏览器只负责 challenge 签名；后续 warehouse API、access key 创建、目录创建与凭证回填都由 knowledge 后端代理执行。</div></div>`,
+    );
+  }
+  if (state.warehouseBootstrapWriteKeyId || state.warehouseBootstrapReadKeyId) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>最近生成的密钥</strong><span class="pill">${escapeHtml(state.warehouseBootstrapReadKeyId ? "读写已回填" : "写已回填")}</span></div><div class="helper">write=${escapeHtml(state.warehouseBootstrapWriteKeyId || "-")} · read=${escapeHtml(state.warehouseBootstrapReadKeyId || "-")}</div></div>`,
+    );
+  }
+  box.className = "detail-list";
+  box.innerHTML = details.join("");
+}
+
+async function saveReadCredential() {
+  const keyId = (el("read-credential-key-id").value || "").trim();
+  const keySecret = (el("read-credential-key-secret").value || "").trim();
+  const rootPath = (el("read-credential-root-path").value || "").trim();
+  if (!keyId || !keySecret || !rootPath) {
+    throw new Error("请完整填写读凭证的 ak / sk / root_path");
+  }
+  const result = await api("/warehouse/credentials/read", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key_id: keyId, key_secret: keySecret, root_path: rootPath }),
+  });
+  await Promise.all([refreshWarehouseStatus(), refreshReadCredentials()]);
+  el("read-credential-key-id").value = "";
+  el("read-credential-key-secret").value = "";
+  el("read-credential-root-path").value = rootPath;
+  setOutput(result);
+}
+
+async function deleteReadCredential(credentialId) {
+  const confirmed = await confirmAction("删除读凭证", "删除后，所有引用它的绑定都必须先解绑。");
+  if (!confirmed) return;
+  await api(`/warehouse/credentials/read/${credentialId}`, { method: "DELETE" });
+  delete state.revealedCredentialSecrets[credentialId];
+  await Promise.all([refreshWarehouseStatus(), refreshReadCredentials()]);
+  setOutput({ ok: true, deleted_credential_id: credentialId });
+}
+
+async function revealReadCredential(credentialId) {
+  const result = await api(`/warehouse/credentials/read/${credentialId}/secret`);
+  state.revealedCredentialSecrets[credentialId] = result.key_secret;
+  renderReadCredentials();
+}
+
+async function saveWriteCredential() {
+  const keyId = (el("write-credential-key-id").value || "").trim();
+  const keySecret = (el("write-credential-key-secret").value || "").trim();
+  const rootPath = (el("write-credential-root-path").value || "").trim();
+  if (!keyId || !keySecret || !rootPath) {
+    throw new Error("请完整填写写凭证的 ak / sk / root_path");
+  }
+  const result = await api("/warehouse/credentials/write", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key_id: keyId, key_secret: keySecret, root_path: rootPath }),
+  });
+  await Promise.all([refreshWarehouseStatus(), refreshWriteCredential()]);
+  el("write-credential-key-id").value = "";
+  el("write-credential-key-secret").value = "";
+  el("write-credential-root-path").value = rootPath;
+  setOutput(result);
+}
+
+async function deleteWriteCredential() {
+  const confirmed = await confirmAction("删除写凭证", "删除后将无法继续上传到当前 Knowledge App 目录。");
+  if (!confirmed) return;
+  const credentialId = currentWriteCredentialId();
+  await api("/warehouse/credentials/write", { method: "DELETE" });
+  if (credentialId) {
+    delete state.revealedCredentialSecrets[credentialId];
+  }
+  await Promise.all([refreshWarehouseStatus(), refreshWriteCredential()]);
+  setOutput({ ok: true });
+}
+
+async function revealWriteCredential() {
+  const result = await api("/warehouse/credentials/write/secret");
+  state.revealedCredentialSecrets[result.id] = result.key_secret;
+  renderWriteCredential();
 }
 
 function renderOps() {
   const overview = el("ops-overview");
-  if (!state.opsOverview) {
-    overview.className = "empty";
-    overview.textContent = "尚未加载运维状态。";
-  } else {
-    overview.className = "grid-3";
-    overview.innerHTML = `
-      <div class="list-item"><div class="list-title">知识库</div><div class="metric-value">${formatNumber(state.opsOverview.knowledge_bases)}</div></div>
-      <div class="list-item"><div class="list-title">文档</div><div class="metric-value">${formatNumber(state.opsOverview.documents)}</div></div>
-      <div class="list-item"><div class="list-title">Chunk</div><div class="metric-value">${formatNumber(state.opsOverview.chunks)}</div></div>
-      <div class="list-item"><div class="list-title">待执行任务</div><div class="metric-value">${formatNumber(state.opsOverview.tasks_pending)}</div></div>
-      <div class="list-item"><div class="list-title">长期记忆</div><div class="metric-value">${formatNumber(state.opsOverview.long_term_memories)}</div></div>
-      <div class="list-item"><div class="list-title">记忆事件</div><div class="metric-value">${formatNumber(state.opsOverview.memory_ingestions)}</div></div>
-    `;
+  if (overview) {
+    if (!state.opsOverview) {
+      overview.className = "empty";
+      overview.textContent = "尚未加载运维状态。";
+    } else {
+      overview.className = "grid-3";
+      overview.innerHTML = `
+        <div class="list-item"><div class="list-title">知识库</div><div class="metric-value">${formatNumber(state.opsOverview.knowledge_bases)}</div></div>
+        <div class="list-item"><div class="list-title">文档</div><div class="metric-value">${formatNumber(state.opsOverview.documents)}</div></div>
+        <div class="list-item"><div class="list-title">Chunk</div><div class="metric-value">${formatNumber(state.opsOverview.chunks)}</div></div>
+        <div class="list-item"><div class="list-title">待执行任务</div><div class="metric-value">${formatNumber(state.opsOverview.tasks_pending)}</div></div>
+        <div class="list-item"><div class="list-title">长期记忆</div><div class="metric-value">${formatNumber(state.opsOverview.long_term_memories)}</div></div>
+        <div class="list-item"><div class="list-title">记忆事件</div><div class="metric-value">${formatNumber(state.opsOverview.memory_ingestions)}</div></div>
+      `;
+    }
   }
 
   const stores = el("ops-stores");
-  if (!state.opsStores) {
-    stores.className = "empty";
-    stores.textContent = "尚未加载健康状态。";
-  } else {
-    const vectorStatus =
-      typeof state.opsStores.vector_store_status === "object"
-        ? JSON.stringify(state.opsStores.vector_store_status)
-        : String(state.opsStores.vector_store_status || "-");
-    stores.className = "detail-list";
-    stores.innerHTML = `
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>数据库</strong><span class="pill ${state.opsStores.database === "ok" ? "success" : "danger"}">${escapeHtml(state.opsStores.database)}</span></div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>向量检索</strong><span class="pill ${String(vectorStatus).includes("error") ? "danger" : "success"}">${escapeHtml(state.opsStores.vector_store_mode)}</span></div>
-        <div class="helper">${escapeHtml(vectorStatus)}</div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>模型网关</strong><span class="pill ${String(state.opsStores.model_provider_status).includes("configured") ? "success" : "warning"}">${escapeHtml(state.opsStores.model_provider_mode)}</span></div>
-        <div class="helper">${escapeHtml(state.opsStores.model_provider_status || "-")}</div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>资产仓库</strong><span class="pill">${escapeHtml(state.opsStores.warehouse_gateway_mode || "-")}</span></div>
-        <div class="helper">${escapeHtml(state.opsStores.warehouse_base_url || "-")}</div>
-      </div>
-    `;
+  if (stores) {
+    if (!state.opsStores) {
+      stores.className = "empty";
+      stores.textContent = "尚未加载健康状态。";
+    } else {
+      const vectorStatus =
+        typeof state.opsStores.vector_store_status === "object"
+          ? JSON.stringify(state.opsStores.vector_store_status)
+          : String(state.opsStores.vector_store_status || "-");
+      stores.className = "detail-list";
+      stores.innerHTML = `
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>数据库</strong><span class="pill ${state.opsStores.database === "ok" ? "success" : "danger"}">${escapeHtml(state.opsStores.database)}</span></div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>向量检索</strong><span class="pill ${String(vectorStatus).includes("error") ? "danger" : "success"}">${escapeHtml(state.opsStores.vector_store_mode)}</span></div>
+          <div class="helper">${escapeHtml(vectorStatus)}</div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>模型网关</strong><span class="pill ${String(state.opsStores.model_provider_status).includes("configured") ? "success" : "warning"}">${escapeHtml(state.opsStores.model_provider_mode)}</span></div>
+          <div class="helper">${escapeHtml(state.opsStores.model_provider_status || "-")}</div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>资产仓库</strong><span class="pill">${escapeHtml(state.opsStores.warehouse_gateway_mode || "-")}</span></div>
+          <div class="helper">${escapeHtml(state.opsStores.warehouse_base_url || "-")}</div>
+        </div>
+      `;
+    }
   }
 
   const workers = el("ops-workers");
-  if (!state.opsWorkers.length) {
-    workers.innerHTML = `<div class="empty">还没有 worker 心跳，先处理一次任务或启动 worker。</div>`;
-  } else {
-    workers.innerHTML = state.opsWorkers
-      .map(
-        (worker) => `
-          <div class="list-item">
-            <div class="list-head">
-              <div class="list-title">${escapeHtml(worker.worker_name)}</div>
-              <span class="pill ${worker.status === "idle" || worker.status === "running" ? "success" : worker.status === "stale" ? "warning" : "danger"}">${escapeHtml(worker.status)}</span>
+  if (workers) {
+    if (!state.opsWorkers.length) {
+      workers.innerHTML = `<div class="empty">还没有 worker 心跳，先处理一次任务或启动 worker。</div>`;
+    } else {
+      workers.innerHTML = state.opsWorkers
+        .map(
+          (worker) => `
+            <div class="list-item">
+              <div class="list-head">
+                <div class="list-title">${escapeHtml(worker.worker_name)}</div>
+                <span class="pill ${worker.status === "idle" || worker.status === "running" ? "success" : worker.status === "stale" ? "warning" : "danger"}">${escapeHtml(worker.status)}</span>
+              </div>
+              <div class="list-meta muted">
+                <span>last seen: ${formatDate(worker.last_seen_at)}</span>
+                <span>last processed: ${formatDate(worker.last_processed_at)}</span>
+              </div>
+              <div class="helper">processed_count=${formatNumber(worker.processed_count)} ${worker.last_error ? `· last_error=${worker.last_error}` : ""}</div>
             </div>
-            <div class="list-meta muted">
-              <span>last seen: ${formatDate(worker.last_seen_at)}</span>
-              <span>last processed: ${formatDate(worker.last_processed_at)}</span>
-            </div>
-            <div class="helper">processed_count=${formatNumber(worker.processed_count)} ${worker.last_error ? `· last_error=${worker.last_error}` : ""}</div>
-          </div>
-        `,
-      )
-      .join("");
+          `,
+        )
+        .join("");
+    }
   }
 
   const failures = el("ops-failures");
@@ -1282,7 +1924,13 @@ function renderSystemReadiness() {
   if (!box) return;
   const checks = [
     { label: "钱包登录", ok: Boolean(state.token), detail: state.wallet ? "已登录" : "未登录" },
-    { label: "资产仓库", ok: state.warehouseBound, detail: state.warehouseBound ? "自动连接成功" : "尚未连通" },
+    {
+      label: "资产仓库",
+      ok: state.warehouseReady,
+      detail: state.warehouseReady
+        ? `读凭证 ${state.readCredentials.length} 个 · 写凭证 ${state.writeCredential ? "已配置" : "未配置"}`
+        : "尚未导入仓库凭证",
+    },
     {
       label: "向量检索",
       ok: Boolean(state.opsStores?.vector_store_status),
@@ -1319,41 +1967,6 @@ async function refreshOps() {
   state.opsWorkers = workers;
   state.opsFailures = failures;
   renderOps();
-}
-
-async function bindWarehouse() {
-  return bindWarehouseViaJwt();
-}
-
-async function bindWarehouseViaJwt(browserWalletParam = null) {
-  const browserWallet =
-    browserWalletParam ||
-    (await window.ethereum.request({ method: "eth_requestAccounts" }))[0];
-  if (!browserWallet || browserWallet.toLowerCase() !== state.wallet.toLowerCase()) {
-    throw new Error("当前浏览器钱包与 knowledge 登录钱包不一致");
-  }
-  const challenge = await api("/warehouse/auth/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: browserWallet }),
-  });
-  const signature = await window.ethereum.request({
-    method: "personal_sign",
-    params: [challenge.challenge, browserWallet],
-  });
-  return api("/warehouse/auth/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: browserWallet, signature }),
-  });
-}
-
-async function unbindWarehouse() {
-  const confirmed = await confirmAction("解绑 warehouse", "解绑后将无法继续浏览、上传和导入 warehouse 资产。");
-  if (!confirmed) return;
-  await api("/warehouse/auth/binding", { method: "DELETE" });
-  await refreshWarehouseStatus();
-  setOutput({ ok: true });
 }
 
 async function refreshKBs() {
@@ -1525,25 +2138,43 @@ function renderBindings() {
   list.innerHTML = `<div class="code">${escapeHtml(JSON.stringify(state.bindings, null, 2))}</div>`;
 }
 
-async function previewWarehouseFile(path) {
-  const result = await api(`/warehouse/preview?path=${encodeURIComponent(path)}`);
+function warehouseBrowseQuery(path, credentialId = currentBrowseCredentialId(), useWriteCredential = isBrowseUsingWriteCredential()) {
+  const params = new URLSearchParams({ path });
+  if (credentialId) params.set("credential_id", String(credentialId));
+  if (useWriteCredential) params.set("use_write_credential", "true");
+  return params.toString();
+}
+
+async function previewWarehouseFile(path, credentialId = currentBrowseCredentialId(), useWriteCredential = isBrowseUsingWriteCredential()) {
+  if (!credentialId && !useWriteCredential) {
+    throw new Error("请先选择浏览凭证");
+  }
+  const result = await api(`/warehouse/preview?${warehouseBrowseQuery(path, credentialId, useWriteCredential)}`);
   state.warehousePreview = result;
   renderWarehousePreview();
   setOutput(result);
 }
 
-async function addBinding(path = null, scopeType = "file") {
+async function addBinding(path = null, scopeType = "auto") {
   const kbId = currentKBOrThrow();
   const sourcePath = (path || el("binding-path").value || "").trim();
+  const credentialId = Number(el("binding-credential-id").value || 0);
+  const selectedScopeType = String(scopeType || bindingScopeType() || "auto").trim().toLowerCase() || "auto";
   if (!sourcePath) {
     throw new Error("绑定路径不能为空");
+  }
+  if (!credentialId) {
+    throw new Error("请选择读凭证");
   }
   const result = await api(`/kbs/${kbId}/bindings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_path: sourcePath, scope_type: scopeType }),
+    body: JSON.stringify({ source_path: sourcePath, scope_type: selectedScopeType, credential_id: credentialId }),
   });
   el("binding-path").value = sourcePath;
+  if (el("binding-scope-type")) {
+    el("binding-scope-type").value = selectedScopeType;
+  }
   setOutput(result);
   await refreshBindings();
   await refreshCurrentKBStats();
@@ -1579,9 +2210,13 @@ async function updateBindingEnabled(bindingId, enabled) {
   await refreshCurrentKBStats();
 }
 
-async function browseWarehouse(path = null) {
-  const targetPath = path || el("browse-path").value || "/personal";
-  const data = await api(`/warehouse/browse?path=${encodeURIComponent(targetPath)}`);
+async function browseWarehouse(path = null, credentialId = currentBrowseCredentialId(), useWriteCredential = isBrowseUsingWriteCredential()) {
+  const targetPath = path || el("browse-path").value || currentWarehouseAppRoot();
+  if (!credentialId && !useWriteCredential) {
+    throw new Error("请先选择浏览凭证");
+  }
+  const data = await api(`/warehouse/browse?${warehouseBrowseQuery(targetPath, credentialId, useWriteCredential)}`);
+  syncWarehouseConfig();
   state.currentBrowsePath = data.path;
   state.warehouseEntries = data.entries || [];
   el("browse-path").value = data.path;
@@ -1626,14 +2261,17 @@ function renderWarehouseEntries() {
     .join("");
 }
 
-async function uploadPersonal() {
+async function uploadAppFile() {
   const fileInput = el("upload-file");
   if (!fileInput.files.length) {
     throw new Error("请选择文件");
   }
+  if (!state.writeCredential) {
+    throw new Error("请先配置写凭证");
+  }
   const form = new FormData();
   form.append("file", fileInput.files[0]);
-  form.append("target_dir", el("target-dir").value || "/personal/uploads");
+  form.append("target_dir", el("target-dir").value || currentWarehouseUploadDir());
   const result = await api("/warehouse/upload", {
     method: "POST",
     body: form,
@@ -1642,7 +2280,7 @@ async function uploadPersonal() {
   el("binding-path").value = result.warehouse_path;
   setOutput(result);
   await refreshUploads();
-  await browseWarehouse(el("target-dir").value || "/personal/uploads");
+  await browseWarehouse(el("target-dir").value || currentWarehouseUploadDir());
 }
 
 async function refreshUploads() {
@@ -1665,8 +2303,8 @@ async function refreshUploads() {
           </div>
           <div class="list-actions">
             <button class="ghost" data-action="bind-path" data-path="${upload.warehouse_target_path}" data-scope="file">绑定</button>
-            <button data-action="import-path" data-path="${upload.warehouse_target_path}">导入</button>
-            <button class="secondary" data-action="open-browse-path" data-path="${upload.warehouse_target_path}">定位</button>
+            <button data-action="import-path" data-path="${upload.warehouse_target_path}" data-use-write-credential="true">导入</button>
+            <button class="secondary" data-action="open-browse-path" data-path="${upload.warehouse_target_path}" data-use-write-credential="true">定位</button>
           </div>
         </div>
       `,
@@ -1681,10 +2319,11 @@ async function createTask(taskType) {
   if (!sourcePath) {
     throw new Error("源路径不能为空");
   }
+  const credentialId = currentBrowseCredentialId() || currentWriteCredentialId();
   const result = await api(`/kbs/${kbId}/tasks/${taskType}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_paths: [sourcePath] }),
+    body: JSON.stringify({ source_paths: [sourcePath], credential_id: credentialId }),
   });
   setOutput(result);
   await refreshTasks();
@@ -2094,120 +2733,179 @@ async function deleteShortMemory(memoryId) {
   await Promise.all([refreshShortMemory(), refreshMemoryIngestions()]);
 }
 
-async function searchKB() {
-  const kbId = Number(el("search-kb-id").value || currentKBOrThrow());
-  const query = el("search-query").value.trim();
+async function refreshRetrievalLogs() {
+  if (!state.selectedKB) {
+    state.retrievalLogs = [];
+    renderRetrievalLogs();
+    return;
+  }
+  state.retrievalLogs = await api(`/kbs/${state.selectedKB.id}/retrieval-logs`);
+  renderRetrievalLogs();
+}
+
+async function refreshSourceGovernance() {
+  if (!state.selectedKB) {
+    state.sourceGovernance = null;
+    renderSourceGovernance();
+    return;
+  }
+  state.sourceGovernance = await api(`/kbs/${state.selectedKB.id}/source-governance`);
+  renderSourceGovernance();
+}
+
+async function runSearchLabCompare() {
+  const kbId = currentKBOrThrow();
+  const query = (el("search-lab-query").value || "").trim();
+  const topK = Number(el("search-lab-top-k").value || 5) || 5;
+  const resultView = el("search-lab-result-view").value || "audit";
+  const availabilityMode = el("search-lab-availability-mode").value || "allow_all";
   if (!query) {
-    throw new Error("query 不能为空");
+    throw new Error("请先输入 query");
   }
-  const result = await api(`/kbs/${kbId}/search`, {
+  const result = await api(`/kbs/${kbId}/search-lab/compare`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      top_k: topK,
+      result_view: resultView,
+      availability_mode: availabilityMode,
+    }),
   });
-  const box = el("search-results");
-  if (!result.length) {
-    box.innerHTML = `<div class="empty">没有命中结果。</div>`;
-  } else {
-    const queryText = query;
-    box.innerHTML = result
-      .map(
-        (item, index) => `
-          <div class="table-row search-table">
-            <div class="table-cell">Top ${index + 1}</div>
-            <div class="table-cell" title="${escapeHtml(item.source_path)}">${escapeHtml(item.source_path)}</div>
-            <div class="table-cell">${Number(item.score).toFixed(4)}</div>
-            <div class="table-cell wrap">${highlightQuery(item.text, queryText)}</div>
-            <div class="table-actions">
-              <button class="secondary" data-action="show-search-hit" data-index="${index}">详情</button>
-              <button class="ghost" data-action="open-browse-path" data-path="${item.source_path}">定位源文件</button>
-            </div>
+  state.searchLabCompare = result;
+  setOutput(result);
+  await Promise.all([refreshRetrievalLogs(), refreshSourceGovernance()]);
+  renderSearchLabCompare();
+}
+
+function renderSearchLabMode(modeTitle, payload) {
+  const hits = payload?.hits || [];
+  return `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>${escapeHtml(modeTitle)}</strong><span class="pill">${escapeHtml(payload?.mode || "-")}</span></div>
+      ${
+        hits.length
+          ? hits
+              .map(
+                (hit) => `
+                  <div class="list-item">
+                    <div class="list-head">
+                      <div class="list-title">${escapeHtml(hit.title || hit.text || hit.result_kind || "-")}</div>
+                      <span class="pill ${hit.content_health_status === "healthy" ? "success" : hit.content_health_status === "stale" ? "warning" : "danger"}">${escapeHtml(hit.content_health_status)}</span>
+                    </div>
+                    <div class="list-subtitle">${escapeHtml(hit.statement || hit.text || "")}</div>
+                    <div class="helper">kind=${escapeHtml(hit.result_kind)} · score=${escapeHtml(String(hit.score ?? "-"))}</div>
+                    ${hit.source_refs?.length ? `<div class="helper">sources=${escapeHtml(hit.source_refs.join(", "))}</div>` : ""}
+                    ${hit.audit_info && Object.keys(hit.audit_info).length ? `<div class="helper">${escapeHtml(JSON.stringify(hit.audit_info))}</div>` : ""}
+                  </div>
+                `,
+              )
+              .join("")
+          : `<div class="empty">无命中。</div>`
+      }
+    </div>
+  `;
+}
+
+function renderSearchLabCompare() {
+  const box = el("search-lab-compare");
+  if (!box) return;
+  if (!state.selectedKB) {
+    box.className = "empty";
+    box.textContent = "先选择知识库。";
+    return;
+  }
+  if (!state.searchLabCompare) {
+    box.className = "empty";
+    box.textContent = "输入 query 后运行 search lab，对比 formal/evidence/formal_first。";
+    return;
+  }
+  const payload = state.searchLabCompare;
+  box.className = "detail-list";
+  box.innerHTML = `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>当前发布面</strong><span class="pill">${escapeHtml(payload.current_release?.version || "workspace-only")}</span></div>
+      <div class="helper">query=${escapeHtml(payload.query)} · retrieval_log_id=${escapeHtml(String(payload.retrieval_log_id || "-"))}</div>
+    </div>
+    ${renderSearchLabMode("Formal Only", payload.formal_only)}
+    ${renderSearchLabMode("Evidence Only", payload.evidence_only)}
+    ${renderSearchLabMode("Formal First", payload.formal_first)}
+  `;
+}
+
+function renderRetrievalLogs() {
+  const list = el("search-lab-log-list");
+  if (!list) return;
+  if (!state.selectedKB) {
+    list.innerHTML = `<div class="empty">先选择知识库后查看检索日志。</div>`;
+    return;
+  }
+  if (!state.retrievalLogs.length) {
+    list.innerHTML = `<div class="empty">当前知识库还没有检索日志。</div>`;
+    return;
+  }
+  list.innerHTML = state.retrievalLogs
+    .map(
+      (log) => `
+        <div class="list-item">
+          <div class="list-head">
+            <div class="list-title">${escapeHtml(log.query)}</div>
+            <span class="pill">${escapeHtml(log.query_mode)}</span>
           </div>
-        `,
-      )
-      .join("");
-  }
-  state.lastSearchResults = result;
-  setOutput(result);
+          <div class="helper">release_id=${escapeHtml(String(log.release_id || "-"))} · ${formatDate(log.created_at)}</div>
+          <div class="helper">${escapeHtml(JSON.stringify(log.result_summary_json || {}))}</div>
+          <div class="list-actions">
+            <button class="ghost" data-action="show-retrieval-log" data-log-id="${log.id}">详情</button>
+          </div>
+        </div>
+      `,
+    )
+    .join("");
 }
 
-async function buildContext() {
-  const sessionId = el("context-session-id").value.trim();
-  const memoryNamespace = el("context-memory-namespace").value.trim();
-  const kbIds = el("context-kb-ids")
-    .value.split(",")
-    .map((item) => Number(item.trim()))
-    .filter(Boolean);
-  const query = el("context-query").value.trim();
-  if (!sessionId || !kbIds.length || !query) {
-    throw new Error("session_id、kb_ids、query 都不能为空");
+function renderSourceGovernance() {
+  const box = el("search-lab-governance");
+  if (!box) return;
+  if (!state.selectedKB) {
+    box.className = "empty";
+    box.textContent = "先选择知识库后查看来源治理信息。";
+    return;
   }
-  el("short-session-id").value = sessionId;
-  el("short-memory-namespace").value = memoryNamespace;
-  const result = await api("/retrieval/context", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query,
-      conversation: {
-        session_id: sessionId,
-        memory_namespace: memoryNamespace || null,
-      },
-      scope: {
-        kb_ids: kbIds,
-        source_scope: [],
-        filters: {},
-      },
-      policy: {},
-      caller: {
-        app_name: "knowledge-console",
-      },
-      debug: true,
-    }),
-  });
-  state.lastContextResult = result;
-  el("context-results").textContent = JSON.stringify(result, null, 2);
-  openDrawer("Retrieval Context", result);
-  setOutput(result);
-}
-
-async function ingestMemoryFromContext() {
-  const sessionId = el("context-session-id").value.trim();
-  const memoryNamespace = el("context-memory-namespace").value.trim();
-  const kbIds = el("context-kb-ids")
-    .value.split(",")
-    .map((item) => Number(item.trim()))
-    .filter(Boolean);
-  const query = el("context-query").value.trim();
-  const answer = el("context-answer").value.trim();
-  if (!sessionId || !query) {
-    throw new Error("请先填写 session_id 和 query");
+  if (!state.sourceGovernance) {
+    box.className = "empty";
+    box.textContent = "当前知识库尚未加载来源治理信息。";
+    return;
   }
-  el("short-session-id").value = sessionId;
-  el("short-memory-namespace").value = memoryNamespace;
-  const result = await api("/memory/ingest", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      session_id: sessionId,
-      memory_namespace: memoryNamespace || null,
-      kb_id: kbIds[0] || state.selectedKB?.id || null,
-      query,
-      answer,
-      source: "console",
-      trace_id: state.lastContextResult?.trace?.trace_id || state.lastContextResult?.trace_id || "",
-      source_refs:
-        state.lastContextResult?.knowledge?.source_refs ||
-        state.lastContextResult?.source_refs ||
-        [],
-    }),
-  });
-  setOutput(result);
-  await Promise.all([refreshLongMemory(), refreshShortMemory(), refreshMemoryIngestions()]);
+  const counts = state.sourceGovernance.status_counts || {};
+  const assets = state.sourceGovernance.assets || [];
+  box.className = "detail-list";
+  box.innerHTML = `
+    <div class="detail-list-item">
+      <div class="detail-list-head"><strong>治理摘要</strong><span class="pill">sources=${escapeHtml(String(counts.sources_total || 0))}</span></div>
+      <div class="helper">source_missing=${escapeHtml(String(counts.source_missing || 0))} · stale=${escapeHtml(String(counts.stale || 0))} · assets_missing=${escapeHtml(String(counts.assets_missing || 0))}</div>
+    </div>
+    ${
+      assets.length
+        ? assets
+            .map(
+              (asset) => `
+                <div class="list-item">
+                  <div class="list-head">
+                    <div class="list-title">${escapeHtml(asset.asset_path)}</div>
+                    <span class="pill ${asset.availability_status === "missing" ? "danger" : "warning"}">${escapeHtml(asset.availability_status)}</span>
+                  </div>
+                  <div class="helper">source_id=${escapeHtml(String(asset.source_id))} · evidence_count=${escapeHtml(String(asset.evidence_count || 0))}</div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="empty">当前没有需要治理的 source_missing / stale 资产。</div>`
+    }
+  `;
 }
 
 async function refreshSelectedData() {
-  await Promise.all([refreshBindings(), refreshDocuments(), refreshCurrentKBStats()]);
+  await Promise.all([refreshBindings(), refreshDocuments(), refreshCurrentKBStats(), refreshRetrievalLogs(), refreshSourceGovernance()]);
 }
 
 async function refreshAll() {
@@ -2215,24 +2913,13 @@ async function refreshAll() {
     renderAll();
     return;
   }
-  const warehouseStatus = await refreshWarehouseStatus();
-  if (!warehouseStatus.jwt_bound && !warehouseStatus.bound) {
-    try {
-      await bindWarehouseViaJwt();
-      notify("success", "已自动通过 JWT 绑定 warehouse personal");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      notify("info", `knowledge 已登录，warehouse 自动绑定未完成：${message}`);
-    }
-  }
   await Promise.all([
     refreshWarehouseStatus(),
+    refreshReadCredentials(),
+    refreshWriteCredential(),
     refreshKBs(),
     refreshTasks(),
     refreshUploads(),
-    refreshLongMemory(),
-    refreshShortMemory(),
-    refreshMemoryIngestions(),
     refreshOps(),
   ]);
   await refreshSelectedData();
@@ -2243,6 +2930,10 @@ function renderAll() {
   renderWalletSummary();
   updateSelectedKBUI();
   renderKBList();
+  updateWarehouseCredentialSelectors();
+  renderReadCredentials();
+  renderWriteCredential();
+  renderWarehouseBootstrapStatus();
   renderBindings();
   renderKBWorkbench();
   renderWarehouseEntries();
@@ -2252,7 +2943,9 @@ function renderAll() {
   renderBreadcrumbs();
   renderTaskDetail();
   renderOps();
-  renderMemoryIngestions();
+  renderSearchLabCompare();
+  renderRetrievalLogs();
+  renderSourceGovernance();
   renderSystemReadiness();
   updateMetrics();
   renderRecentActivity();
@@ -2263,122 +2956,170 @@ function attachStaticEvents() {
     item.addEventListener("click", () => setView(item.dataset.viewTarget));
   });
 
-  el("jump-dashboard").addEventListener("click", () => setView("dashboard"));
-  el("jump-warehouse").addEventListener("click", () => setView("warehouse"));
-  el("jump-retrieval").addEventListener("click", () => setView("retrieval"));
-  el("refresh-ops").addEventListener("click", () => withFeedback(refreshOps, "运维状态已刷新")().catch(() => {}));
+  bindEvent("jump-dashboard", "click", () => setView("dashboard"));
+  bindEvent("jump-warehouse", "click", () => setView("warehouse"));
+  bindEvent("jump-search-lab", "click", () => setView("search-lab"));
+  bindEvent("refresh-ops", "click", () => withFeedback(refreshOps, "运维状态已刷新")().catch(() => {}));
 
-  el("connect-wallet").addEventListener("click", () => withFeedback(loginWithWallet, "knowledge 登录成功")().catch(() => {}));
-  el("logout-button").addEventListener("click", () => withFeedback(logout, "已退出 knowledge")().catch(() => {}));
-  el("dashboard-refresh-all").addEventListener("click", () => withFeedback(refreshAll, "已刷新全部数据")().catch(() => {}));
+  bindEvent("connect-wallet", "click", () => withFeedback(loginWithWallet, "knowledge 登录成功")().catch(() => {}));
+  bindEvent("logout-button", "click", () => withFeedback(logout, "已退出 knowledge")().catch(() => {}));
+  bindEvent("dashboard-refresh-all", "click", () => withFeedback(refreshAll, "已刷新全部数据")().catch(() => {}));
 
-  el("refresh-kbs").addEventListener("click", () => withFeedback(refreshKBs, "知识库列表已刷新")().catch(() => {}));
-  el("open-create-kb").addEventListener("click", () => {
+  bindEvent("refresh-kbs", "click", () => withFeedback(refreshKBs, "知识库列表已刷新")().catch(() => {}));
+  bindEvent("open-create-kb", "click", () => {
     try {
       openKBEditor("create");
     } catch (err) {
       notify("error", err.message);
     }
   });
-  el("open-edit-kb").addEventListener("click", () => {
+  bindEvent("open-edit-kb", "click", () => {
     try {
       openKBEditor("edit");
     } catch (err) {
       notify("error", err.message);
     }
   });
-  el("create-kb").addEventListener("click", () => withFeedback(createKB, "知识库创建成功")().catch(() => {}));
-  el("update-kb").addEventListener("click", () => withFeedback(updateKB, "知识库配置已更新")().catch(() => {}));
-  el("delete-kb").addEventListener("click", () => withFeedback(() => deleteKB(), "知识库已删除")().catch(() => {}));
-  el("refresh-bindings").addEventListener("click", () => withFeedback(refreshBindings, "绑定源已刷新")().catch(() => {}));
-  el("add-binding").addEventListener("click", () => withFeedback(() => addBinding(), "绑定源已添加")().catch(() => {}));
+  bindEvent("create-kb", "click", () => withFeedback(createKB, "知识库创建成功")().catch(() => {}));
+  bindEvent("update-kb", "click", () => withFeedback(updateKB, "知识库配置已更新")().catch(() => {}));
+  bindEvent("delete-kb", "click", () => withFeedback(() => deleteKB(), "知识库已删除")().catch(() => {}));
+  bindEvent("refresh-bindings", "click", () => withFeedback(refreshBindings, "绑定源已刷新")().catch(() => {}));
+  bindEvent("binding-credential-id", "change", () => {
+    const credential = bindingCredential();
+    if (!credential) return;
+    setBrowseAccessSource(`read:${credential.id}`);
+  });
+  bindEvent("use-current-browse-for-binding", "click", () => {
+    withFeedback(async () => {
+      await ensureBindingBrowseContext();
+      const path = state.currentBrowsePath || bindingCredential()?.root_path || currentWarehouseUploadDir();
+      el("binding-path").value = path;
+      if (el("binding-scope-type")) {
+        el("binding-scope-type").value = "directory";
+      }
+    }, "已填入当前浏览路径")().catch(() => {});
+  });
+  bindEvent("add-binding", "click", () => withFeedback(() => addBinding(), "绑定源已添加")().catch(() => {}));
+  bindEvent("save-read-credential", "click", () =>
+    withFeedback(saveReadCredential, "读凭证已导入")().catch(() => {}),
+  );
 
-  el("browse-warehouse").addEventListener("click", () => withFeedback(() => browseWarehouse(), "仓库目录已刷新")().catch(() => {}));
-  el("browse-personal-root").addEventListener("click", () => withFeedback(() => browseWarehouse("/personal"))().catch(() => {}));
-  el("browse-apps-root").addEventListener("click", () => withFeedback(() => browseWarehouse("/apps"))().catch(() => {}));
-  el("clear-warehouse-filter").addEventListener("click", () => {
+  bindEvent("browse-warehouse", "click", () => withFeedback(() => browseWarehouse(), "仓库目录已刷新")().catch(() => {}));
+  bindEvent("browse-app-root", "click", () => withFeedback(() => browseWarehouse(currentWarehouseAppRoot()))().catch(() => {}));
+  bindEvent("browse-upload-root", "click", () => withFeedback(() => browseWarehouse(currentWarehouseUploadDir()))().catch(() => {}));
+  bindEvent("warehouse-access-source", "change", (event) => {
+    state.browseAccessSource = event.target.value || "";
+  });
+  bindEvent("clear-warehouse-filter", "click", () => {
     el("warehouse-filter").value = "";
     renderWarehouseEntries();
   });
-  el("warehouse-filter").addEventListener("input", () => renderWarehouseEntries());
-  el("path-picker-close").addEventListener("click", () => closePathPicker());
-  el("path-picker-filter").addEventListener("input", () => {
+  bindEvent("warehouse-filter", "input", () => renderWarehouseEntries());
+  bindEvent("path-picker-close", "click", () => closePathPicker());
+  bindEvent("path-picker-filter", "input", () => {
     if (state.pathPickerFieldId) {
       renderPathPicker(state.pathPickerFieldId);
     }
   });
   document.querySelectorAll("[data-path-field]").forEach((node) => {
-    node.addEventListener("focus", () => renderPathPicker(node.id));
-    node.addEventListener("click", () => renderPathPicker(node.id));
+    node.addEventListener("focus", () => {
+      openPathPickerForField(node.id).catch((err) => {
+        notify("error", err.message);
+        setOutput(err.message);
+      });
+    });
+    node.addEventListener("click", () => {
+      openPathPickerForField(node.id).catch((err) => {
+        notify("error", err.message);
+        setOutput(err.message);
+      });
+    });
   });
-  el("upload-personal").addEventListener("click", () => withFeedback(uploadPersonal, "文件已上传到 warehouse personal")().catch(() => {}));
-  el("refresh-uploads").addEventListener("click", () => withFeedback(refreshUploads, "上传记录已刷新")().catch(() => {}));
+  bindEvent("save-write-credential", "click", () =>
+    withFeedback(saveWriteCredential, "写凭证已保存")().catch(() => {}),
+  );
+  bindEvent("delete-write-credential", "click", () =>
+    withFeedback(deleteWriteCredential, "写凭证已删除")().catch(() => {}),
+  );
+  bindEvent("bootstrap-warehouse-uploads", "click", () =>
+    withFeedback(() => bootstrapWarehouseCredentials("uploads_bundle"), "uploads 读写凭证初始化完成")().catch(() => {}),
+  );
+  bindEvent("bootstrap-warehouse-app-root", "click", () =>
+    withFeedback(() => bootstrapWarehouseCredentials("app_root_write"), "app 根写凭证初始化完成")().catch(() => {}),
+  );
+  bindEvent("clear-warehouse-temp-session", "click", () =>
+    withFeedback(() => clearWarehouseTempSession(), "warehouse 临时会话已清理")().catch(() => {}),
+  );
+  bindEvent("upload-app", "click", () => withFeedback(uploadAppFile, "文件已上传到 Knowledge App 目录")().catch(() => {}));
+  bindEvent("refresh-uploads", "click", () => withFeedback(refreshUploads, "上传记录已刷新")().catch(() => {}));
 
-  el("create-import-task").addEventListener("click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
-  el("create-reindex-task").addEventListener("click", () => withFeedback(createReindexTask, "重建任务已创建")().catch(() => {}));
-  el("create-delete-task").addEventListener("click", () => withFeedback(createDeleteTask, "删除任务已创建")().catch(() => {}));
-  el("create-import-from-bindings").addEventListener("click", () =>
+  bindEvent("create-import-task", "click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
+  bindEvent("create-reindex-task", "click", () => withFeedback(createReindexTask, "重建任务已创建")().catch(() => {}));
+  bindEvent("create-delete-task", "click", () => withFeedback(createDeleteTask, "删除任务已创建")().catch(() => {}));
+  bindEvent("create-import-from-bindings", "click", () =>
     withFeedback(createImportTaskFromBindings, "已按绑定源创建导入任务")().catch(() => {}),
   );
-  el("create-reindex-from-bindings").addEventListener("click", () =>
+  bindEvent("create-reindex-from-bindings", "click", () =>
     withFeedback(createReindexTaskFromBindings, "已按绑定源创建重建任务")().catch(() => {}),
   );
-  el("create-delete-from-bindings").addEventListener("click", () =>
+  bindEvent("create-delete-from-bindings", "click", () =>
     withFeedback(createDeleteTaskFromBindings, "已按绑定源创建删除任务")().catch(() => {}),
   );
-  el("clear-task-filter").addEventListener("click", () => {
+  bindEvent("clear-task-filter", "click", () => {
     el("task-status-filter").value = "";
     refreshTasks().catch((err) => {
       notify("error", err.message);
       setOutput(err.message);
     });
   });
-  el("task-status-filter").addEventListener("change", () => {
+  bindEvent("task-status-filter", "change", () => {
     refreshTasks().catch((err) => {
       notify("error", err.message);
       setOutput(err.message);
     });
   });
-  el("refresh-tasks").addEventListener("click", () => withFeedback(refreshTasks, "任务列表已刷新")().catch(() => {}));
-  el("process-pending-tasks").addEventListener("click", () => withFeedback(processPendingTasks, "已处理待执行任务")().catch(() => {}));
+  bindEvent("refresh-tasks", "click", () => withFeedback(refreshTasks, "任务列表已刷新")().catch(() => {}));
+  bindEvent("process-pending-tasks", "click", () => withFeedback(processPendingTasks, "已处理待执行任务")().catch(() => {}));
 
-  el("clear-document-filter").addEventListener("click", () => {
+  bindEvent("clear-document-filter", "click", () => {
     el("document-filter").value = "";
     renderDocuments();
   });
-  el("document-filter").addEventListener("input", () => renderDocuments());
-  el("refresh-documents").addEventListener("click", () => withFeedback(refreshDocuments, "文档列表已刷新")().catch(() => {}));
-  el("refresh-long-memory").addEventListener("click", () => withFeedback(refreshLongMemory, "长期记忆已刷新")().catch(() => {}));
-  el("save-memory").addEventListener("click", () => withFeedback(saveLongMemory, "长期记忆已写入")().catch(() => {}));
-  el("refresh-short-memory").addEventListener("click", () => withFeedback(refreshShortMemory, "短期记忆已刷新")().catch(() => {}));
-  el("save-short-memory").addEventListener("click", () => withFeedback(saveShortMemory, "短期记忆已写入")().catch(() => {}));
-  el("refresh-memory-ingestions").addEventListener("click", () => withFeedback(refreshMemoryIngestions, "自动沉淀记录已刷新")().catch(() => {}));
+  bindEvent("document-filter", "input", () => renderDocuments());
+  bindEvent("refresh-documents", "click", () => withFeedback(refreshDocuments, "文档列表已刷新")().catch(() => {}));
+  bindEvent("run-search-lab", "click", () => withFeedback(runSearchLabCompare, "Search Lab 对比已更新")().catch(() => {}));
+  bindEvent("refresh-search-lab", "click", () =>
+    withFeedback(async () => {
+      await Promise.all([refreshRetrievalLogs(), refreshSourceGovernance()]);
+      renderSearchLabCompare();
+    }, "Search Lab 数据已刷新")().catch(() => {}),
+  );
+  bindEvent("refresh-retrieval-logs", "click", () => withFeedback(refreshRetrievalLogs, "检索日志已刷新")().catch(() => {}));
+  bindEvent("refresh-source-governance", "click", () =>
+    withFeedback(refreshSourceGovernance, "来源治理信息已刷新")().catch(() => {}),
+  );
 
-  el("search-kb").addEventListener("click", () => withFeedback(searchKB, "检索完成")().catch(() => {}));
-  el("build-context").addEventListener("click", () => withFeedback(buildContext, "上下文已生成")().catch(() => {}));
-  el("ingest-memory-context").addEventListener("click", () => withFeedback(ingestMemoryFromContext, "本轮记忆已沉淀")().catch(() => {}));
-
-  el("confirm-cancel").addEventListener("click", () => closeConfirm(false));
-  el("confirm-ok").addEventListener("click", () => closeConfirm(true));
-  el("drawer-close").addEventListener("click", () => closeDrawer());
-  el("detail-drawer").addEventListener("click", (event) => {
+  bindEvent("confirm-cancel", "click", () => closeConfirm(false));
+  bindEvent("confirm-ok", "click", () => closeConfirm(true));
+  bindEvent("drawer-close", "click", () => closeDrawer());
+  bindEvent("detail-drawer", "click", (event) => {
     if (event.target.id === "detail-drawer") {
       closeDrawer();
     }
   });
-  el("kb-editor-close").addEventListener("click", () => closeKBEditor());
-  el("kb-editor-drawer").addEventListener("click", (event) => {
+  bindEvent("kb-editor-close", "click", () => closeKBEditor());
+  bindEvent("kb-editor-drawer", "click", (event) => {
     if (event.target.id === "kb-editor-drawer") {
       closeKBEditor();
     }
   });
-  el("document-drawer-close").addEventListener("click", () => closeDocumentDrawer());
-  el("document-drawer").addEventListener("click", (event) => {
+  bindEvent("document-drawer-close", "click", () => closeDocumentDrawer());
+  bindEvent("document-drawer", "click", (event) => {
     if (event.target.id === "document-drawer") {
       closeDocumentDrawer();
     }
   });
-  el("path-picker-menu").addEventListener("click", (event) => {
+  bindEvent("path-picker-menu", "click", (event) => {
     if (event.target.id === "path-picker-menu") {
       closePathPicker();
     }
@@ -2396,7 +3137,10 @@ function attachStaticEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
-    const pickerTarget = event.target.closest("[data-picker-select]");
+    const clickTarget = event.target;
+    if (!(clickTarget instanceof Element)) return;
+
+    const pickerTarget = clickTarget.closest("[data-picker-select]");
     if (pickerTarget) {
       const fieldId = pickerTarget.dataset.pickerTarget;
       const path = pickerTarget.dataset.pickerPath;
@@ -2409,7 +3153,7 @@ function attachStaticEvents() {
       }
       return;
     }
-    const pickerNav = event.target.closest("[data-picker-nav-path]");
+    const pickerNav = clickTarget.closest("[data-picker-nav-path]");
     if (pickerNav) {
       const path = pickerNav.dataset.pickerNavPath;
       if (path) {
@@ -2421,7 +3165,7 @@ function attachStaticEvents() {
       return;
     }
 
-    const target = event.target.closest("[data-action]");
+    const target = clickTarget.closest("[data-action]");
     if (!target) return;
     const { action } = target.dataset;
     if (action === "select-kb") {
@@ -2462,6 +3206,37 @@ function attachStaticEvents() {
       withFeedback(() => deleteBinding(Number(target.dataset.bindingId)), "绑定源已解绑")().catch(() => {});
       return;
     }
+    if (action === "reveal-read-credential") {
+      withFeedback(() => revealReadCredential(Number(target.dataset.credentialId)))().catch(() => {});
+      return;
+    }
+    if (action === "delete-read-credential") {
+      withFeedback(() => deleteReadCredential(Number(target.dataset.credentialId)), "读凭证已删除")().catch(() => {});
+      return;
+    }
+    if (action === "use-read-credential") {
+      const credentialId = Number(target.dataset.credentialId || 0);
+      if (credentialId > 0) {
+        const bindingSelect = el("binding-credential-id");
+        if (bindingSelect) bindingSelect.value = String(credentialId);
+        const browseSelect = el("warehouse-access-source");
+        if (browseSelect) browseSelect.value = `read:${credentialId}`;
+        state.browseAccessSource = `read:${credentialId}`;
+        notify("success", "已切换到该读凭证");
+      }
+      return;
+    }
+    if (action === "reveal-write-credential") {
+      withFeedback(revealWriteCredential)().catch(() => {});
+      return;
+    }
+    if (action === "use-write-credential") {
+      const browseSelect = el("warehouse-access-source");
+      if (browseSelect) browseSelect.value = "write";
+      state.browseAccessSource = "write";
+      notify("success", "已切换到写凭证浏览");
+      return;
+    }
     if (action === "open-entry") {
       withFeedback(() => browseWarehouse(target.dataset.path))().catch(() => {});
       return;
@@ -2475,6 +3250,15 @@ function attachStaticEvents() {
       return;
     }
     if (action === "import-path") {
+      if (target.dataset.useWriteCredential === "true") {
+        const browseSelect = el("warehouse-access-source");
+        if (browseSelect && state.writeCredential) {
+          browseSelect.value = "write";
+        }
+        if (state.writeCredential) {
+          state.browseAccessSource = "write";
+        }
+      }
       withFeedback(() => createImportTask(target.dataset.path), "导入任务已创建")().catch(() => {});
       return;
     }
@@ -2497,6 +3281,15 @@ function attachStaticEvents() {
     if (action === "open-browse-path") {
       const path = target.dataset.path || "/";
       const targetPath = path.includes("/") ? path.replace(/\/[^/]+$/, "") || "/" : path;
+      if (target.dataset.credentialId) {
+        const browseSelect = el("warehouse-access-source");
+        if (browseSelect) browseSelect.value = `read:${target.dataset.credentialId}`;
+        state.browseAccessSource = `read:${target.dataset.credentialId}`;
+      } else if (target.dataset.useWriteCredential === "true") {
+        const browseSelect = el("warehouse-access-source");
+        if (browseSelect) browseSelect.value = "write";
+        state.browseAccessSource = "write";
+      }
       withFeedback(() => browseWarehouse(targetPath))().catch(() => {});
       setView("warehouse");
       return;
@@ -2578,18 +3371,23 @@ function attachStaticEvents() {
       if (eventRow) openDrawer(`记忆沉淀 #${eventRow.id}`, eventRow);
       return;
     }
+    if (action === "show-retrieval-log") {
+      const log = state.retrievalLogs.find((item) => item.id === Number(target.dataset.logId));
+      if (log) openDrawer(`检索日志 #${log.id}`, log);
+      return;
+    }
     if (action === "jump-view") {
       setView(target.dataset.view || "dashboard");
       return;
-    }
-    if (action === "show-search-hit") {
-      const item = state.lastSearchResults?.[Number(target.dataset.index)];
-      if (item) openDrawer(`检索命中 #${item.chunk_id}`, item);
     }
   });
 }
 
 attachStaticEvents();
+refreshWalletEnvironment().catch(() => {});
+window.addEventListener("focus", () => {
+  refreshWalletEnvironment().catch(() => {});
+});
 
 if (state.token && state.wallet) {
   setLoggedIn(state.wallet);

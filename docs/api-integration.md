@@ -1,22 +1,22 @@
 # Knowledge API 接入文档
 
-`knowledge` 负责消费 `warehouse` 中的资产，为 bot / chat 类服务提供检索、上下文与记忆沉淀能力。
+`knowledge` 负责消费 `warehouse` 中的资产，为外部服务提供已发布知识视图、证据兜底、服务授权与检索审计能力。
 
 ## 资产边界
 
 - `warehouse` 是唯一资产中心
 - `knowledge` 只读消费 `warehouse` 资产
-- 用户上传文件时，仍然是上传到 `warehouse personal`
+- 用户上传文件时，只写入 `knowledge` 自己的 app 目录
 - `knowledge` 不回写 chunk、embedding 或知识处理结果到 `warehouse`
 
 ## 推荐调用顺序
 
 1. 调用 `POST /auth/challenge`
 2. 用钱包签名后调用 `POST /auth/verify`
-3. 持 `Authorization: Bearer <knowledge_jwt>` 调用中立的 context / retrieval 接口
-4. bot / chat 生成最终回答
-5. 调用 `POST /memory/ingest` 显式沉淀本轮记忆
-6. 后续继续调用 `POST /retrieval/context` 或兼容接口 `POST /retrieval-context`
+3. 创建 `ServicePrincipal`，拿到服务侧 `api_key`
+4. 为目标 KB 创建 `ServiceGrant`
+5. 服务侧携带 `X-Service-Api-Key` 调用 `POST /service/search*`
+6. 如需调试，管理侧再调用 `search-lab / retrieval-logs / source-governance`
 
 ## 核心接口
 
@@ -26,70 +26,56 @@
 - `POST /auth/verify`
 - `POST /auth/refresh`
 
-### 2. 中立上下文接口
+说明：
 
-- `POST /retrieval/context`
+- 当前控制台前端会优先选择夜莺钱包 provider；当浏览器里同时存在夜莺钱包与 MetaMask 时，默认先尝试夜莺钱包
+- 浏览器钱包接入兼容显式注入位和 EIP-6963 provider 广播
 
-推荐新的 bot/chat/应用编排层优先使用该接口。
+### 2. 服务身份与授权
 
-该接口采用“钱包用户 + 会话上下文 + 检索范围 + 检索策略”的中立模型，支持传入：
+- `POST /service-principals`
+- `POST /service-principals/verify`
+- `GET /service-principals`
+- `POST /kbs/{kb_id}/grants`
+- `GET /kbs/{kb_id}/grants`
+- `PATCH /kbs/{kb_id}/grants/{grant_id}`
 
-- `conversation.session_id`
-- `conversation.conversation_id`
-- `conversation.memory_namespace`
-- `conversation.scene`
-- `conversation.intent`
-- `scope.kb_ids`
-- `scope.source_scope`
-- `scope.filters`
-- `policy.top_k`
-- `policy.memory_top_k`
-- `policy.token_budget`
-- `caller.app_name`
-- `caller.request_id`
-- `debug`
+### 3. 服务检索主入口
 
-该接口返回：
+- `POST /service/search`
+- `POST /service/search/formal`
+- `POST /service/search/evidence`
 
-- `knowledge.hits`
-- `knowledge.source_refs`
-- `memory.short_term_hits`
-- `memory.long_term_hits`
-- `context.sections`
-- `context.assembled_context`
-- `trace.applied_policy`
-- `trace.trace_id`
-- `debug`
+这些接口的共同特征：
+
+- 读取对象是“已发布正式知识项 + 证据兜底”，而不是旧 retrieval/context 块
+- 结果明确带 `content_health_status` / `source_health_summary`
+- 读取哪一个 release 由 `ServiceGrant.release_selection_mode` 决定
 
 说明：
 
+- `POST /service/search*` 当前稳定返回面以 `release / grant / hits` 为主，不额外返回 `trace/debug` 顶层对象
+- 如果请求未显式传 `result_view`，会回退到 `ServiceGrant.default_result_mode`
 - `memory_namespace` 是由上游应用生成的 opaque key，用于隔离不同机器人/工作流的短期记忆
 - `knowledge` 不维护 bot 对象，只消费该 namespace 做短期记忆隔离
-- `trace.trace_id` 用于串联 retrieval 响应、后续 `POST /memory/ingest` 事件，以及运维排障查询
-- `trace.applied_policy` 表示实际生效的 retrieval policy，而不是简单回显请求参数
-- `debug` 仅在请求显式开启时返回；它用于解释过滤条件、作用域限制、空结果原因、budget 裁剪和 provider 模式，不属于稳定顶层返回面
 
-### 3. 分层 retrieval APIs
+### 3. Service Search APIs
 
-- `POST /retrieval/search`
-- `POST /retrieval/retrieve`
-- `POST /retrieval/recall-memory`
-- `POST /retrieval/assemble-context`
-- `POST /retrieval/generate-context`
+- `POST /service/search`
+- `POST /service/search/formal`
+- `POST /service/search/evidence`
+- `GET /service/grants`
+- `GET /service/kbs`
+- `GET /service/releases/current`
 
 说明：
 
-- `POST /retrieval/search`：原始知识命中查询，只返回 hits / trace / debug，不负责 `source_refs` 汇总或 policy 回显
-- `POST /retrieval/retrieve`：知识检索能力面，返回 knowledge hits、`source_refs` 与 `applied_policy`，但不做 memory recall 或 context assembly
-- `POST /retrieval/recall-memory`：独立记忆召回，只处理 session / `memory_namespace` / kb 范围内的短期与长期记忆
-- `POST /retrieval/assemble-context`：只做上下文组装，只消费显式传入的 knowledge / memory hits 与 budget
-- `POST /retrieval/generate-context`：组合型 retrieval API，内部串联 retrieve / recall-memory / assemble-context
-
-当前 provider 一致性口径：
-
-- 已验证 `db` 与 `weaviate` 模式在过滤语义上保持一致，包括 `source_scope`、`source_kinds`、`document_ids`
-- 已验证 `mock` 与 `openai_compatible` embedding provider 的调用契约与返回形状
-- 不承诺不同向量后端的相似度分值、排序细节或召回分布完全一致
+- `POST /service/search`：默认 `formal_first`，先读已发布正式知识项，不足时补证据项
+- `POST /service/search/formal`：只返回已发布正式知识项
+- `POST /service/search/evidence`：只返回证据项，适合调试或未形成正式知识项的场景
+- 所有服务搜索都要求服务先通过 `ServicePrincipal` 证明身份，再由 `ServiceGrant` 决定可读 KB 与 release 选择策略
+- 所有服务搜索结果都显式带 `content_health_status` / `source_health_summary`
+- `formal_first` 会排除已经支撑 formal 命中的证据，避免 formal / evidence 重复返回同一条证据
 
 ### 3.1 绑定源驱动的任务接口
 
@@ -107,40 +93,30 @@
 - `PATCH /kbs/{kb_id}/bindings/{binding_id}` 可启用/停用某个绑定源
 - `GET /kbs/{kb_id}/workbench` 返回绑定源同步状态、最近任务与知识库工作台摘要
 
-### 4. 兼容检索接口
+### 4. Search Lab / Governance APIs
 
-- `POST /kbs/{kb_id}/search`
-- `POST /bot/retrieval-context`
-- `POST /retrieval-context`
+- `POST /kbs/{kb_id}/search-lab/compare`
+- `GET /kbs/{kb_id}/retrieval-logs`
+- `GET /kbs/{kb_id}/retrieval-logs/{log_id}`
+- `GET /kbs/{kb_id}/source-governance`
 
-`/retrieval-context` 返回：
+说明：
 
-- `short_term_memory_blocks`
-- `long_term_memory_blocks`
-- `kb_blocks`
-- `source_refs`
-- `scores`
-- `trace_id`
+- `search-lab/compare` 用于对比 `formal_only / evidence_only / formal_first`
+- `retrieval-logs` 用于审计服务消费行为
+- `source-governance` 用于查看 `source_missing / stale` 对结果的影响范围
 
-`POST /retrieval-context` 目前仍保留，用于兼容旧接入方；内部已经复用新的分层 retrieval pipeline。
-
-兼容边界：
-
-- legacy 与标准入口要求“语义一致、形状不同”
-- `POST /retrieval/context` 继续作为新接入默认主入口
-- `POST /retrieval-context` 不再演化新的独立编排逻辑
-
-### 5. 自动记忆沉淀
+### 5. 兼容记忆接口
 
 - `POST /memory/ingest`
 - `GET /memory/ingestions`
 
-推荐在 bot / chat 生成最终回复后调用 `POST /memory/ingest`。
+`memory` 相关接口仍保留为兼容模块，但不再是当前主产品叙事。
 
 说明：
 
-- `POST /memory/ingest` 推荐透传上一次 retrieval 响应中的 `trace_id`
-- `GET /memory/ingestions` 可按 `trace_id` 过滤，用于排查 retrieval → memory ingest 链路
+- `POST /memory/ingest` 支持由调用方自行透传 `trace_id`
+- `GET /memory/ingestions` 可按 `trace_id` 过滤，用于排查调用方自己的 retrieval → memory ingest 链路
 
 示例：
 
@@ -152,7 +128,7 @@
   "answer": "好的，后续我会保持简洁回答。",
   "source": "bot",
   "trace_id": "trace-demo",
-  "source_refs": ["/personal/uploads/profile.txt"]
+  "source_refs": ["/apps/knowledge.yeying.pub/uploads/profile.txt"]
 }
 ```
 
@@ -165,17 +141,20 @@
 
 ## Warehouse 相关说明
 
-- `knowledge` 前台会自动尝试绑定 `warehouse personal`
-- 对 `personal` 的实际访问目前主路径仍然是 JWT
-- UCAN 仍保留在后端能力中，用于后续更细粒度 app 访问
+- 当前控制台主流程使用手工导入的读凭证 / 写凭证访问 `warehouse`
+- 默认 app 标识为 `knowledge.yeying.pub`，主路径为 `/apps/knowledge.yeying.pub/`
+- 上传、浏览、绑定、导入都只允许发生在该 app 目录内
+- 保存写凭证时，后端会尝试在凭证作用域内完成当前 app 目录或目标根路径的最小 bootstrap
+- 旧 `/warehouse/auth/*` JWT / UCAN 绑定接口已经从当前仓库删除
+- 控制面接口参考 `docs/control-plane-api.md`
+- 读写凭证使用方式参考 `docs/warehouse-credential-usage.md`
 
 ## 稳定性建议
 
 - 外部服务只依赖公开 API，不直接依赖控制台行为
-- 生产接入优先使用 `POST /bot/retrieval-context + POST /memory/ingest` 组合
-- 生产接入优先使用 `POST /retrieval/context + POST /memory/ingest` 组合
-- 需要细粒度编排时，再按需调用 `POST /retrieval/*`
-- 对 `trace_id`、`source_refs` 做日志留存，便于问题排查
+- 生产接入优先使用 `POST /service/search`
+- 需要正式知识项和证据结果拆分时，再按需调用 `POST /service/search/formal` / `POST /service/search/evidence`
+- 对 `retrieval_logs`、`source_governance` 和 release 选择策略做留存，便于问题排查
 - 遇到索引异常时，优先检查 `/ops/*` 与最近失败任务
 - `GET /ops/tasks/failures` 可按 `trace_id` 过滤最近失败任务，用于最小 trace 关联排障
 - worker 运行协调已从本地文件锁迁移为数据库租约；若是多实例部署，请确保各实例共享同一数据库

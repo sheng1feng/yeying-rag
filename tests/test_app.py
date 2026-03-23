@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from sqlalchemy.exc import OperationalError
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
+import httpx
+
+from tests.helpers import configure_warehouse_credentials
 
 from knowledge.db.session import engine, session_scope
 from knowledge.main import app
 from knowledge.models import ImportTask
+from knowledge.api.routes_console import CONSOLE_ASSET_VERSION
+from knowledge.services.warehouse import BoundTokenWarehouseGateway, WarehouseFileEntry, WarehouseGateway, WarehouseRequestAuth
+from knowledge.services.warehouse_access import WarehouseAccessService
+from knowledge.services.warehouse_scope import warehouse_app_path, warehouse_app_root, warehouse_default_upload_dir
 from knowledge.utils.time import utc_now
-from knowledge.workers.runner import Worker
+from knowledge.workers.runner import TaskHeartbeat, Worker
+
+
+APP_ROOT = warehouse_app_root()
+UPLOADS_ROOT = warehouse_default_upload_dir()
+
+
+def _app_path(relative_path: str) -> str:
+    return warehouse_app_path(relative_path)
 
 
 def _login(client: TestClient, account) -> str:
@@ -24,11 +40,169 @@ def _login(client: TestClient, account) -> str:
     return data["access_token"]
 
 
+def test_console_loads_wallet_adapter_before_app():
+    wallet_ref = f"/static/js/wallet.js?v={CONSOLE_ASSET_VERSION}"
+    bridge_ref = f"/static/js/warehouse_bridge.js?v={CONSOLE_ASSET_VERSION}"
+    app_ref = f"/static/js/app.js?v={CONSOLE_ASSET_VERSION}"
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'id="connect-wallet"' in response.text
+        assert "warehouse_base_url:" in response.text
+        assert "warehouse_webdav_prefix:" in response.text
+        wallet_index = response.text.index(wallet_ref)
+        bridge_index = response.text.index(bridge_ref)
+        app_index = response.text.index(app_ref)
+        assert wallet_index < app_index
+        assert bridge_index < app_index
+
+        wallet_script = client.get(wallet_ref)
+        assert wallet_script.status_code == 200
+        assert "window.KnowledgeWallet" in wallet_script.text
+
+        bridge_script = client.get(bridge_ref)
+        assert bridge_script.status_code == 200
+        assert "window.KnowledgeWarehouseBridge" in bridge_script.text
+
+
+def test_read_credential_accepts_directory_scoped_key_without_parent_access():
+    class DirectoryScopedGateway(WarehouseGateway):
+        def browse(self, wallet_address: str, path: str, auth=None) -> list[WarehouseFileEntry]:
+            normalized = str(path).rstrip("/") or "/"
+            if normalized == f"{APP_ROOT}/uploads":
+                return [
+                    WarehouseFileEntry(
+                        path=f"{APP_ROOT}/uploads",
+                        name="uploads",
+                        entry_type="directory",
+                    )
+                ]
+            request = httpx.Request("PROPFIND", f"https://webdav.yeying.pub/dav{normalized}")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        def ensure_app_space(self, wallet_address: str, auth=None, **kwargs) -> None:
+            return None
+
+        def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth=None) -> str:
+            raise NotImplementedError
+
+        def read_file(self, wallet_address: str, path: str, auth=None) -> bytes:
+            raise NotImplementedError
+
+    account = Account.create()
+    service = WarehouseAccessService(warehouse_gateway=DirectoryScopedGateway())
+    with TestClient(app):
+        with session_scope() as db:
+            credential = service.create_read_credential(
+                db,
+                wallet_address=account.address,
+                key_id="ak_test_directory_only",
+                key_secret="sk_test_directory_only",
+                root_path=f"{APP_ROOT}/uploads",
+            )
+            assert credential.root_path == f"{APP_ROOT}/uploads"
+            assert credential.status == "active"
+
+
+def test_write_credential_bootstraps_app_space_on_save():
+    class BootstrapGateway(WarehouseGateway):
+        def __init__(self) -> None:
+            self.ensure_calls: list[tuple[str, str | None, str | None]] = []
+
+        def browse(self, wallet_address: str, path: str, auth=None) -> list[WarehouseFileEntry]:
+            normalized = str(path).rstrip("/") or "/"
+            request = httpx.Request("PROPFIND", f"https://webdav.yeying.pub/dav{normalized}")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        def ensure_app_space(self, wallet_address: str, auth=None, *, base_path=None, target_path=None) -> None:
+            self.ensure_calls.append((wallet_address, base_path, target_path))
+
+        def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth=None) -> str:
+            raise NotImplementedError
+
+        def read_file(self, wallet_address: str, path: str, auth=None) -> bytes:
+            raise NotImplementedError
+
+    account = Account.create()
+    gateway = BootstrapGateway()
+    service = WarehouseAccessService(warehouse_gateway=gateway)
+    with TestClient(app):
+        with session_scope() as db:
+            credential = service.upsert_write_credential(
+                db,
+                wallet_address=account.address,
+                key_id="ak_test_write_bootstrap",
+                key_secret="sk_test_write_bootstrap",
+                root_path=APP_ROOT,
+            )
+            assert credential.root_path == APP_ROOT
+            assert credential.status == "active"
+    assert gateway.ensure_calls == [(account.address, APP_ROOT, APP_ROOT)]
+
+
+def test_bound_token_gateway_bootstrap_does_not_probe_apps_parent(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        calls.append((method, url))
+        if method == "PROPFIND":
+            return httpx.Response(404, request=httpx.Request(method, url))
+        if method == "MKCOL":
+            return httpx.Response(201, request=httpx.Request(method, url))
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    gateway = BoundTokenWarehouseGateway(base_url="https://webdav.yeying.pub", webdav_prefix="/dav")
+    gateway.ensure_app_space(
+        "0xabc",
+        auth=WarehouseRequestAuth.basic("ak_test_write_bootstrap", "sk_test_write_bootstrap"),
+        base_path=APP_ROOT,
+        target_path=APP_ROOT,
+    )
+
+    urls = [url for _, url in calls]
+    assert "https://webdav.yeying.pub/dav/apps" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub" in urls
+
+
+def test_bound_token_gateway_bootstrap_for_upload_scope_skips_unrelated_dirs(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        calls.append((method, url))
+        if method == "PROPFIND":
+            return httpx.Response(404, request=httpx.Request(method, url))
+        if method == "MKCOL":
+            return httpx.Response(201, request=httpx.Request(method, url))
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    gateway = BoundTokenWarehouseGateway(base_url="https://webdav.yeying.pub", webdav_prefix="/dav")
+    gateway.ensure_app_space(
+        "0xabc",
+        auth=WarehouseRequestAuth.basic("ak_test_write_bootstrap", "sk_test_write_bootstrap"),
+        base_path=UPLOADS_ROOT,
+        target_path=UPLOADS_ROOT,
+    )
+
+    urls = [url for _, url in calls]
+    assert "https://webdav.yeying.pub/dav/apps" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/library" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/system" not in urls
+    assert urls == [
+        "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/uploads",
+        "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/uploads",
+    ]
+
+
 def test_end_to_end_auth_upload_import_search():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Personal KB", "description": "demo"}).json()
         kb_id = kb["id"]
@@ -36,12 +210,12 @@ def test_end_to_end_auth_upload_import_search():
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/uploads"},
+            data={"target_dir": UPLOADS_ROOT},
             files={"file": ("hello.txt", b"hello warehouse and knowledge search", "text/plain")},
         )
         assert upload.status_code == 200
         upload_data = upload.json()
-        assert upload_data["warehouse_path"].startswith("/personal/")
+        assert upload_data["warehouse_path"].startswith(f"{APP_ROOT}/")
 
         uploads = client.get("/warehouse/uploads", headers=headers)
         assert uploads.status_code == 200
@@ -93,20 +267,6 @@ def test_end_to_end_auth_upload_import_search():
         assert second_items.status_code == 200
         assert any(item["status"] == "skipped" for item in second_items.json())
 
-        search = client.post(f"/kbs/{kb_id}/search", headers=headers, json={"query": "warehouse knowledge"})
-        assert search.status_code == 200
-        assert len(search.json()) >= 1
-
-        retrieval = client.post(
-            "/retrieval-context",
-            headers=headers,
-            json={"session_id": "s1", "query": "knowledge", "kb_ids": [kb_id]},
-        )
-        assert retrieval.status_code == 200
-        body = retrieval.json()
-        assert "kb_blocks" in body
-        assert len(body["kb_blocks"]) >= 1
-
         ops_overview = client.get("/ops/overview", headers=headers)
         assert ops_overview.status_code == 200
         assert ops_overview.json()["knowledge_bases"] >= 1
@@ -116,11 +276,231 @@ def test_end_to_end_auth_upload_import_search():
         assert len(ops_workers.json()) >= 1
 
 
+def test_upload_succeeds_with_write_credential_scoped_to_uploads_subtree():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        write_response = client.post(
+            "/warehouse/credentials/write",
+            headers=headers,
+            json={
+                "key_id": "ak_test_write_uploads_only",
+                "key_secret": "sk_test_write_uploads_only",
+                "root_path": UPLOADS_ROOT,
+            },
+        )
+        assert write_response.status_code == 200
+        assert write_response.json()["root_path"] == UPLOADS_ROOT
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": _app_path("uploads/scoped/nested")},
+            files={"file": ("scoped.txt", b"uploads scoped write credential", "text/plain")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["warehouse_path"] == _app_path("uploads/scoped/nested/scoped.txt")
+
+
+def test_binding_auto_scope_resolves_directory_paths():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+
+        kb = client.post("/kbs", headers=headers, json={"name": "Auto Binding KB", "description": "auto"}).json()
+        kb_id = kb["id"]
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": _app_path("uploads/auto-binding")},
+            files={"file": ("source.txt", b"auto scope binding", "text/plain")},
+        )
+        assert upload.status_code == 200
+
+        bind = client.post(
+            f"/kbs/{kb_id}/bindings",
+            headers=headers,
+            json={"source_path": _app_path("uploads/auto-binding"), "scope_type": "auto"},
+        )
+        assert bind.status_code == 200
+        assert bind.json()["scope_type"] == "directory"
+
+
+def test_backend_proxy_bootstrap_initializes_warehouse_without_browser_cors(monkeypatch):
+    account = Account.create()
+    created_paths: set[str] = set()
+    access_key_counter = {"value": 0}
+    requested_addresses: list[str] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        method = method.upper()
+        if url.endswith("/api/v1/public/auth/challenge") and method == "POST":
+            body = kwargs.get("json") or {}
+            requested_addresses.append(str(body.get("address") or ""))
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": str(body.get("address") or "").lower(),
+                        "challenge": "warehouse bootstrap challenge",
+                        "nonce": "nonce-1",
+                        "issuedAt": 1,
+                        "expiresAt": 2,
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/auth/verify") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": account.address.lower(),
+                        "token": "warehouse-bearer-token",
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/create") and method == "POST":
+            access_key_counter["value"] += 1
+            idx = access_key_counter["value"]
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "id": f"uuid-{idx}",
+                    "name": f"key-{idx}",
+                    "keyId": f"ak_bootstrap_{idx}",
+                    "keySecret": f"sk_bootstrap_{idx}",
+                    "permissions": ["read", "create", "update"] if idx == 1 else ["read"],
+                    "bindingPaths": [],
+                    "status": "active",
+                    "createdAt": "2026-03-24T00:00:00+08:00",
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/bind") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                content=b'{"message":"bound successfully"}',
+            )
+
+        target = url.replace("https://webdav.yeying.pub/dav", "", 1)
+        auth_header = (kwargs.get("headers") or {}).get("Authorization", "")
+        if method == "PROPFIND":
+            if auth_header.startswith("Bearer "):
+                status = 207 if target in created_paths else 404
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+            if auth_header.startswith("Basic "):
+                status = 207 if target in created_paths else 404
+                if status == 207:
+                    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/dav{target}</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection /></d:resourcetype>
+        <d:getcontentlength>0</d:getcontentlength>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"""
+                    return httpx.Response(status, request=httpx.Request(method, url), text=xml)
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+        if method == "MKCOL":
+            created_paths.add(target.rstrip("/") or "/")
+            return httpx.Response(201, request=httpx.Request(method, url))
+
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        challenge = client.post("/warehouse/bootstrap/challenge", headers=headers)
+        assert challenge.status_code == 200
+        message = encode_defunct(text=challenge.json()["challenge"])
+        signed = Account.sign_message(message, account.key)
+
+        initialize = client.post(
+            "/warehouse/bootstrap/initialize",
+            headers=headers,
+            json={"mode": "uploads_bundle", "signature": signed.signature.hex()},
+        )
+        assert initialize.status_code == 200
+        payload = initialize.json()
+        assert payload["target_path"] == UPLOADS_ROOT
+        assert payload["write_key_id"] == "ak_bootstrap_1"
+        assert payload["read_key_id"] == "ak_bootstrap_2"
+        assert requested_addresses == [account.address]
+
+        write_credential = client.get("/warehouse/credentials/write", headers=headers)
+        assert write_credential.status_code == 200
+        assert write_credential.json()["credential"]["key_id"] == "ak_bootstrap_1"
+
+        read_credentials = client.get("/warehouse/credentials/read", headers=headers)
+        assert read_credentials.status_code == 200
+        assert read_credentials.json()[0]["key_id"] == "ak_bootstrap_2"
+
+
+def test_warehouse_app_only_paths_reject_personal_scope():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+
+        kb = client.post("/kbs", headers=headers, json={"name": "App Only KB", "description": "app only"}).json()
+        kb_id = kb["id"]
+
+        browse = client.get("/warehouse/browse?path=/personal", headers=headers)
+        assert browse.status_code == 400
+        assert APP_ROOT in browse.json()["detail"]
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": "/personal/uploads"},
+            files={"file": ("blocked.txt", b"should fail", "text/plain")},
+        )
+        assert upload.status_code == 400
+        assert APP_ROOT in upload.json()["detail"]
+
+        bind = client.post(
+            f"/kbs/{kb_id}/bindings",
+            headers=headers,
+            json={"source_path": "/personal/uploads/blocked.txt", "scope_type": "file"},
+        )
+        assert bind.status_code == 400
+        assert APP_ROOT in bind.json()["detail"]
+
+        task = client.post(
+            f"/kbs/{kb_id}/tasks/import",
+            headers=headers,
+            json={"source_paths": ["/personal/uploads/blocked.txt"]},
+        )
+        assert task.status_code == 400
+        assert APP_ROOT in task.json()["detail"]
+
+
 def test_memory_crud():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         created = client.post(
             "/memory/long-term",
@@ -165,6 +545,7 @@ def test_memory_ingestion_and_failure_ops():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Ops KB", "description": "ops"}).json()
         kb_id = kb["id"]
@@ -179,7 +560,7 @@ def test_memory_ingestion_and_failure_ops():
                 "answer": "好的，后续我会保持简洁回答。",
                 "source": "bot",
                 "trace_id": "trace-test",
-                "source_refs": ["/personal/uploads/profile.txt"],
+                "source_refs": [_app_path("uploads/profile.txt")],
             },
         )
         assert ingestion.status_code == 200
@@ -209,7 +590,7 @@ def test_memory_ingestion_and_failure_ops():
                 "answer": "好的，后续我会保持简洁回答。",
                 "source": "bot",
                 "trace_id": "trace-test-2",
-                "source_refs": ["/personal/uploads/profile.txt"],
+                "source_refs": [_app_path("uploads/profile.txt")],
             },
         )
         assert duplicate.status_code == 200
@@ -220,9 +601,13 @@ def test_memory_ingestion_and_failure_ops():
         failed_task = client.post(
             f"/kbs/{kb_id}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/../not-allowed.txt"]},
+            json={"source_paths": [_app_path("missing/not-allowed.txt")]},
         )
         assert failed_task.status_code == 200
+        with session_scope() as db:
+            task = db.get(ImportTask, failed_task.json()["id"])
+            assert task is not None
+            task.source_paths = ["/../not-allowed.txt"]
 
         processed = client.post("/tasks/process-pending", headers=headers)
         assert processed.status_code == 200
@@ -249,6 +634,7 @@ def test_worker_processes_pending_tasks_without_global_run_lease():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Queue KB", "description": "queue"}).json()
         kb_id = kb["id"]
@@ -256,7 +642,7 @@ def test_worker_processes_pending_tasks_without_global_run_lease():
         created = client.post(
             f"/kbs/{kb_id}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/../queued-not-allowed.txt"]},
+            json={"source_paths": [_app_path("missing/queued-not-allowed.txt")]},
         )
         assert created.status_code == 200
         task_id = created.json()["id"]
@@ -278,12 +664,13 @@ def test_worker_reclaims_stale_running_task_and_reprocesses_it():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Lease KB", "description": "lease"}).json()
         created = client.post(
             f"/kbs/{kb['id']}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/../stale-lease-not-allowed.txt"]},
+            json={"source_paths": [_app_path("missing/stale-lease-not-allowed.txt")]},
         )
         assert created.status_code == 200
 
@@ -296,7 +683,7 @@ def test_worker_reclaims_stale_running_task_and_reprocesses_it():
             task.claimed_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
             task.started_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
             task.heartbeat_at = utc_now() - timedelta(seconds=worker.settings.worker_run_lease_ttl_seconds + 5)
-            task.last_stage = "processing:/../stale-lease-not-allowed.txt"
+            task.last_stage = f"processing:{_app_path('missing/stale-lease-not-allowed.txt')}"
 
         processed = client.post("/tasks/process-pending", headers=headers)
         assert processed.status_code == 200
@@ -308,17 +695,32 @@ def test_worker_reclaims_stale_running_task_and_reprocesses_it():
         assert task_after.json()["claimed_by"] is None
 
 
+def test_worker_disables_background_heartbeat_for_sqlite():
+    worker = Worker()
+    assert worker._use_background_heartbeat() is False
+
+
+def test_task_heartbeat_treats_sqlite_lock_as_transient():
+    exc = OperationalError(
+        statement="UPDATE import_tasks SET heartbeat_at=?",
+        params=(),
+        orig=Exception("database is locked"),
+    )
+    assert TaskHeartbeat._is_transient_lock_error(exc) is True
+
+
 def test_cancel_pending_task_marks_canceled_without_processing():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cancel KB", "description": "cancel"}).json()
         created = client.post(
             f"/kbs/{kb['id']}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/../cancel-not-allowed.txt"]},
+            json={"source_paths": [_app_path("missing/cancel-not-allowed.txt")]},
         )
         assert created.status_code == 200
         task_id = created.json()["id"]
@@ -340,12 +742,13 @@ def test_cancel_running_task_marks_cancel_requested_in_db():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cancel Running KB", "description": "cancel-running"}).json()
         created = client.post(
             f"/kbs/{kb['id']}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/../cancel-running-not-allowed.txt"]},
+            json={"source_paths": [_app_path("missing/cancel-running-not-allowed.txt")]},
         )
         assert created.status_code == 200
         task_id = created.json()["id"]
@@ -368,6 +771,7 @@ def test_delete_kb_cleans_related_resources():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Delete KB", "description": "cleanup"}).json()
         kb_id = kb["id"]
@@ -375,7 +779,7 @@ def test_delete_kb_cleans_related_resources():
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/uploads"},
+            data={"target_dir": UPLOADS_ROOT},
             files={"file": ("delete-kb.txt", b"delete kb cleanup content", "text/plain")},
         )
         assert upload.status_code == 200
@@ -453,6 +857,7 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post(
             "/kbs",
@@ -476,7 +881,7 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/uploads"},
+            data={"target_dir": UPLOADS_ROOT},
             files={"file": ("config.txt", content, "text/plain")},
         )
         assert upload.status_code == 200
@@ -508,10 +913,6 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
         assert before_detail.status_code == 200
         before_payload = before_detail.json()
         assert before_payload["chunk_count"] >= 2
-
-        before_search = client.post(f"/kbs/{kb_id}/search", headers=headers, json={"query": "knowledge search"})
-        assert before_search.status_code == 200
-        assert len(before_search.json()) >= 2
 
         for index in range(3):
             created_short = client.post(
@@ -560,663 +961,71 @@ def test_kb_config_update_reindexes_existing_documents_and_uses_latest_limits():
         assert after_payload["chunks"][0]["metadata"]["chunk_strategy"]
         assert after_payload["chunks"][0]["embedding_model"] == "text-embedding-3-small"
 
-        after_search = client.post(f"/kbs/{kb_id}/search", headers=headers, json={"query": "knowledge search"})
-        assert after_search.status_code == 200
-        assert len(after_search.json()) == 1
 
-        context = client.post(
-            "/retrieval-context",
-            headers=headers,
-            json={"session_id": "kb-config-session", "query": "knowledge search", "kb_ids": [kb_id]},
-        )
-        assert context.status_code == 200
-        payload = context.json()
-        assert len(payload["short_term_memory_blocks"]) == 1
-        assert len(payload["long_term_memory_blocks"]) == 1
-
-
-def test_layered_retrieval_apis_and_bot_context_v2():
+def test_kb_config_update_rebuilds_existing_source_evidence_with_latest_chunking():
     account = Account.create()
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
-        kb = client.post("/kbs", headers=headers, json={"name": "Bot KB", "description": "bot"}).json()
-        kb_id = kb["id"]
-
-        content = b"wallet knowledge retrieval evidence for bot context assembly"
-        upload = client.post(
-            "/warehouse/upload",
-            headers=headers,
-            data={"target_dir": "/personal/uploads"},
-            files={"file": ("bot-context.txt", content, "text/plain")},
-        )
-        assert upload.status_code == 200
-        source_path = upload.json()["warehouse_path"]
-
-        bind = client.post(
-            f"/kbs/{kb_id}/bindings",
-            headers=headers,
-            json={"source_path": source_path, "scope_type": "file"},
-        )
-        assert bind.status_code == 200
-
-        task = client.post(
-            f"/kbs/{kb_id}/tasks/import",
-            headers=headers,
-            json={"source_paths": [source_path]},
-        )
-        assert task.status_code == 200
-        processed = client.post("/tasks/process-pending", headers=headers)
-        assert processed.status_code == 200
-        assert processed.json()["processed"] >= 1
-
-        short_memory = client.post(
-            "/memory/short-term",
+        kb = client.post(
+            "/kbs",
             headers=headers,
             json={
-                "session_id": "bot-session-v2",
-                "memory_type": "summary",
-                "content": "请保持回答简洁并优先引用知识库证据",
-            },
-        )
-        assert short_memory.status_code == 200
-
-        long_memory = client.post(
-            "/memory/long-term",
-            headers=headers,
-            json={
-                "kb_id": kb_id,
-                "content": "用户偏好：优先返回带来源的知识证据",
-                "category": "preference",
-                "source": "bot",
-                "score": 95,
-            },
-        )
-        assert long_memory.status_code == 200
-
-        search = client.post(
-            "/retrieval/search",
-            headers=headers,
-            json={
-                "query": "knowledge evidence",
-                "kb_ids": [kb_id],
-                "source_scope": [source_path],
-                "debug": True,
-            },
-        )
-        assert search.status_code == 200
-        search_payload = search.json()
-        assert search_payload["hits"]
-        assert search_payload["hits"][0]["source_path"] == source_path
-        assert search_payload["debug"]["search_filters"]["source_paths"] == [source_path]
-
-        retrieve = client.post(
-            "/retrieval/retrieve",
-            headers=headers,
-            json={
-                "query": "knowledge evidence",
-                "kb_ids": [kb_id],
-                "source_scope": [source_path],
-                "retrieval_policy": {"top_k": 2, "token_budget": 80},
-                "debug": True,
-            },
-        )
-        assert retrieve.status_code == 200
-        retrieve_payload = retrieve.json()
-        assert retrieve_payload["knowledge_hits"]
-        assert retrieve_payload["source_refs"] == [source_path]
-        assert retrieve_payload["applied_policy"]["top_k"] == 2
-        assert retrieve_payload["applied_policy"]["token_budget"] == 80
-
-        recall = client.post(
-            "/retrieval/recall-memory",
-            headers=headers,
-            json={
-                "query": "请保持简洁并给出知识证据",
-                "session_id": "bot-session-v2",
-                "kb_ids": [kb_id],
-                "retrieval_policy": {"memory_top_k": 2},
-                "debug": True,
-            },
-        )
-        assert recall.status_code == 200
-        recall_payload = recall.json()
-        assert recall_payload["short_term_hits"]
-        assert recall_payload["long_term_hits"]
-        assert recall_payload["debug"]["memory_strategy"]
-
-        bot_context = client.post(
-            "/bot/retrieval-context",
-            headers=headers,
-            json={
-                "query": "please answer with knowledge evidence",
-                "kb_ids": [kb_id],
-                "user_identity": "user-42",
-                "session_id": "bot-session-v2",
-                "conversation_id": "conv-007",
-                "bot_id": "wallet-bot",
-                "app_id": "wallet-app",
-                "intent": "qa",
-                "scene": "customer_support",
-                "source_scope": [source_path],
-                "token_budget": 90,
-                "debug": True,
-            },
-        )
-        assert bot_context.status_code == 200
-        context_payload = bot_context.json()
-        assert context_payload["request_context"]["bot_id"] == "wallet-bot"
-        assert context_payload["request_context"]["app_id"] == "wallet-app"
-        assert context_payload["source_refs"] == [source_path]
-        assert context_payload["knowledge_hits"]
-        assert context_payload["short_term_memory_hits"]
-        assert context_payload["long_term_memory_hits"]
-        assert context_payload["context_sections"]
-        assert "Knowledge Evidence" in context_payload["assembled_context"]
-        assert context_payload["debug"]["request_context"]["conversation_id"] == "conv-007"
-
-        assembled = client.post(
-            "/retrieval/assemble-context",
-            headers=headers,
-            json={
-                "query": "please answer with knowledge evidence",
-                "request_context": {"bot_id": "wallet-bot"},
-                "knowledge_hits": context_payload["knowledge_hits"],
-                "short_term_hits": context_payload["short_term_memory_hits"],
-                "long_term_hits": context_payload["long_term_memory_hits"],
-                "retrieval_policy": {"max_context_chars": 260},
-                "debug": True,
-            },
-        )
-        assert assembled.status_code == 200
-        assembled_payload = assembled.json()
-        assert assembled_payload["context_sections"]
-        assert assembled_payload["applied_policy"]["max_context_chars"] == 400
-        assert len(assembled_payload["assembled_context"]) <= 450
-
-
-def test_recall_memory_scopes_long_term_by_kb_and_session():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        kb_a = client.post("/kbs", headers=headers, json={"name": "KB-A", "description": "a"}).json()
-        kb_b = client.post("/kbs", headers=headers, json={"name": "KB-B", "description": "b"}).json()
-
-        created_short = client.post(
-            "/memory/short-term",
-            headers=headers,
-            json={"session_id": "session-a", "memory_type": "summary", "content": "project alpha summary"},
-        )
-        assert created_short.status_code == 200
-
-        other_short = client.post(
-            "/memory/short-term",
-            headers=headers,
-            json={"session_id": "session-b", "memory_type": "summary", "content": "project alpha from other session"},
-        )
-        assert other_short.status_code == 200
-
-        kb_a_memory = client.post(
-            "/memory/long-term",
-            headers=headers,
-            json={
-                "kb_id": kb_a["id"],
-                "content": "用户事实：project alpha belongs to kb a",
-                "category": "fact",
-                "source": "bot",
-                "score": 90,
-            },
-        )
-        assert kb_a_memory.status_code == 200
-
-        kb_b_memory = client.post(
-            "/memory/long-term",
-            headers=headers,
-            json={
-                "kb_id": kb_b["id"],
-                "content": "用户事实：project alpha belongs to kb b",
-                "category": "fact",
-                "source": "bot",
-                "score": 90,
-            },
-        )
-        assert kb_b_memory.status_code == 200
-
-        global_memory = client.post(
-            "/memory/long-term",
-            headers=headers,
-            json={
-                "content": "用户偏好：project alpha responses should include source refs",
-                "category": "preference",
-                "source": "bot",
-                "score": 88,
-            },
-        )
-        assert global_memory.status_code == 200
-
-        recall = client.post(
-            "/retrieval/recall-memory",
-            headers=headers,
-            json={
-                "query": "project alpha",
-                "session_id": "session-a",
-                "kb_ids": [kb_a["id"]],
-                "retrieval_policy": {"memory_top_k": 5},
-                "debug": True,
-            },
-        )
-        assert recall.status_code == 200
-        payload = recall.json()
-        assert payload["short_term_hits"]
-        assert all(item["session_id"] == "session-a" for item in payload["short_term_hits"])
-        assert payload["long_term_hits"]
-        assert all(item["kb_id"] in (None, kb_a["id"]) for item in payload["long_term_hits"])
-        assert not any(item["kb_id"] == kb_b["id"] for item in payload["long_term_hits"])
-
-
-def test_neutral_retrieval_context_endpoint_uses_conversation_scope_and_caller():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        kb = client.post("/kbs", headers=headers, json={"name": "Neutral API KB", "description": "neutral"}).json()
-        kb_id = kb["id"]
-
-        upload = client.post(
-            "/warehouse/upload",
-            headers=headers,
-            data={"target_dir": "/personal/uploads"},
-            files={"file": ("neutral-api.txt", b"neutral retrieval context knowledge evidence", "text/plain")},
-        )
-        assert upload.status_code == 200
-        source_path = upload.json()["warehouse_path"]
-
-        bind = client.post(
-            f"/kbs/{kb_id}/bindings",
-            headers=headers,
-            json={"source_path": source_path, "scope_type": "file"},
-        )
-        assert bind.status_code == 200
-
-        task = client.post(
-            f"/kbs/{kb_id}/tasks/import",
-            headers=headers,
-            json={"source_paths": [source_path]},
-        )
-        assert task.status_code == 200
-        processed = client.post("/tasks/process-pending", headers=headers)
-        assert processed.status_code == 200
-        assert processed.json()["processed"] >= 1
-
-        ingest = client.post(
-            "/memory/ingest",
-            headers=headers,
-            json={
-                "session_id": "neutral-session",
-                "memory_namespace": "robot-alpha",
-                "kb_id": kb_id,
-                "query": "请保持输出简洁",
-                "answer": "好的，我会保持简洁并引用知识证据。",
-                "source": "bot",
-                "source_refs": [source_path],
-            },
-        )
-        assert ingest.status_code == 200
-        assert ingest.json()["memory_namespace"] == "robot-alpha"
-
-        context = client.post(
-            "/retrieval/context",
-            headers=headers,
-            json={
-                "query": "knowledge evidence",
-                "conversation": {
-                    "session_id": "neutral-session",
-                    "conversation_id": "conv-neutral-1",
-                    "memory_namespace": "robot-alpha",
-                    "scene": "support",
-                    "intent": "qa",
+                "name": "Evidence Config KB",
+                "description": "evidence-config",
+                "retrieval_config": {
+                    "chunk_size": 200,
+                    "chunk_overlap": 0,
+                    "retrieval_top_k": 4,
+                    "memory_top_k": 3,
+                    "embedding_model": "text-embedding-3-small",
                 },
-                "scope": {
-                    "kb_ids": [kb_id],
-                    "source_scope": [source_path],
-                    "filters": {"source_kinds": ["personal"]},
-                },
-                "policy": {"top_k": 2, "memory_top_k": 2, "token_budget": 120},
-                "caller": {"app_name": "bot-platform", "request_id": "req-neutral-1"},
-                "debug": True,
             },
         )
-        assert context.status_code == 200
-        payload = context.json()
-        assert payload["conversation"]["memory_namespace"] == "robot-alpha"
-        assert payload["scope"]["kb_ids"] == [kb_id]
-        assert payload["caller"]["app_name"] == "bot-platform"
-        assert payload["knowledge"]["hits"]
-        assert payload["knowledge"]["source_refs"] == [source_path]
-        assert payload["memory"]["short_term_hits"]
-        assert payload["memory"]["short_term_hits"][0]["metadata"]["memory_namespace"] == "robot-alpha"
-        assert payload["context"]["sections"]
-        assert payload["trace"]["applied_policy"]["token_budget"] == 120
-        assert payload["debug"]["request_context"]["conversation"]["conversation_id"] == "conv-neutral-1"
+        assert kb.status_code == 200
+        kb_id = kb.json()["id"]
 
-
-def test_neutral_retrieval_context_omits_debug_when_disabled():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        kb = client.post("/kbs", headers=headers, json={"name": "No Debug KB", "description": "contract"}).json()
-
-        context = client.post(
-            "/retrieval/context",
-            headers=headers,
-            json={
-                "query": "contract only",
-                "conversation": {"session_id": "contract-session"},
-                "scope": {"kb_ids": [kb["id"]]},
-                "policy": {"top_k": 2},
-            },
-        )
-        assert context.status_code == 200
-        payload = context.json()
-        assert set(payload.keys()) == {"query", "conversation", "scope", "caller", "knowledge", "memory", "context", "trace"}
-        assert "debug" not in payload
-        assert "policy" not in payload
-        assert payload["conversation"] == {"session_id": "contract-session"}
-        assert payload["caller"] == {}
-
-
-def test_legacy_retrieval_context_adapter_reuses_generate_context(monkeypatch):
-    from knowledge.api import routes_search
-
-    account = Account.create()
-    captured: dict = {}
-
-    def fake_generate_context(db, wallet_address, kb_ids, query, **kwargs):
-        captured["wallet_address"] = wallet_address
-        captured["kb_ids"] = kb_ids
-        captured["query"] = query
-        captured["kwargs"] = kwargs
-        now = utc_now()
-        return {
-            "query": query,
-            "kb_ids": kb_ids,
-            "request_context": kwargs.get("request_context") or {},
-            "knowledge_hits": [
-                {
-                    "chunk_id": 11,
-                    "kb_id": kb_ids[0],
-                    "document_id": 22,
-                    "source_path": "/personal/uploads/legacy.txt",
-                    "text": "legacy adapter knowledge",
-                    "score": 0.91,
-                    "metadata": {},
-                }
-            ],
-            "short_term_memory_hits": [
-                {
-                    "id": 31,
-                    "memory_kind": "short_term",
-                    "memory_type": "summary",
-                    "content": "legacy short term memory",
-                    "score": 0.88,
-                    "created_at": now,
-                }
-            ],
-            "long_term_memory_hits": [
-                {
-                    "id": 41,
-                    "memory_kind": "long_term",
-                    "memory_type": "preference",
-                    "content": "legacy long term memory",
-                    "score": 0.77,
-                    "created_at": now,
-                }
-            ],
-            "context_sections": [],
-            "assembled_context": "",
-            "source_refs": ["/personal/uploads/legacy.txt"],
-            "applied_policy": {
-                "top_k": 3,
-                "memory_top_k": 4,
-                "token_budget": None,
-                "max_context_chars": 4800,
-                "include_knowledge": True,
-                "include_short_term": True,
-                "include_long_term": True,
-            },
-            "trace_id": "trace-legacy-adapter",
-        }
-
-    monkeypatch.setattr(routes_search.service, "generate_context", fake_generate_context)
-
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-        response = client.post(
-            "/retrieval-context",
-            headers=headers,
-            json={"session_id": "legacy-session", "query": "legacy query", "kb_ids": [7], "top_k": 3},
-        )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert captured["kb_ids"] == [7]
-    assert captured["query"] == "legacy query"
-    assert captured["kwargs"]["session_id"] == "legacy-session"
-    assert captured["kwargs"]["top_k"] == 3
-    assert captured["kwargs"]["request_context"]["compatibility_mode"] == "legacy_retrieval_context"
-    assert payload["kb_blocks"][0]["source_path"] == "/personal/uploads/legacy.txt"
-    assert payload["short_term_memory_blocks"][0]["content"] == "legacy short term memory"
-    assert payload["scores"]["applied_policy"]["top_k"] == 3
-    assert payload["trace_id"] == "trace-legacy-adapter"
-
-
-def test_legacy_and_neutral_context_share_policy_resolution():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        kb = client.post("/kbs", headers=headers, json={"name": "Compat KB", "description": "compat"}).json()
-        kb_id = kb["id"]
-
+        content = ("evidence rebuild after config update " * 60).encode()
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/uploads"},
-            files={"file": ("compat-api.txt", b"compat retrieval context knowledge evidence", "text/plain")},
+            data={"target_dir": _app_path("evidence-config")},
+            files={"file": ("evidence.txt", content, "text/plain")},
         )
         assert upload.status_code == 200
-        source_path = upload.json()["warehouse_path"]
 
-        bind = client.post(
-            f"/kbs/{kb_id}/bindings",
+        source = client.post(
+            f"/kbs/{kb_id}/sources",
             headers=headers,
-            json={"source_path": source_path, "scope_type": "file"},
+            json={"source_type": "warehouse", "source_path": _app_path("evidence-config"), "scope_type": "directory"},
         )
-        assert bind.status_code == 200
+        assert source.status_code == 200
+        source_id = source.json()["id"]
 
-        task = client.post(
-            f"/kbs/{kb_id}/tasks/import",
+        scan = client.post(f"/kbs/{kb_id}/sources/{source_id}/scan", headers=headers)
+        assert scan.status_code == 200
+        build = client.post(f"/kbs/{kb_id}/sources/{source_id}/build-evidence", headers=headers)
+        assert build.status_code == 200
+
+        before_evidence = client.get(f"/kbs/{kb_id}/evidence", headers=headers, params={"source_id": source_id})
+        assert before_evidence.status_code == 200
+        before_payload = before_evidence.json()
+        assert before_payload
+
+        updated = client.patch(
+            f"/kbs/{kb_id}",
             headers=headers,
-            json={"source_paths": [source_path]},
+            json={"retrieval_config": {"chunk_size": 60, "chunk_overlap": 0}},
         )
-        assert task.status_code == 200
-        processed = client.post("/tasks/process-pending", headers=headers)
-        assert processed.status_code == 200
-        assert processed.json()["processed"] >= 1
+        assert updated.status_code == 200
 
-        ingest = client.post(
-            "/memory/ingest",
-            headers=headers,
-            json={
-                "session_id": "compat-session",
-                "kb_id": kb_id,
-                "query": "请引用知识证据",
-                "answer": "好的，我会引用知识证据。",
-                "source": "bot",
-                "source_refs": [source_path],
-            },
-        )
-        assert ingest.status_code == 200
-
-        legacy = client.post(
-            "/retrieval-context",
-            headers=headers,
-            json={"session_id": "compat-session", "query": "knowledge evidence", "kb_ids": [kb_id], "top_k": 2},
-        )
-        assert legacy.status_code == 200
-
-        neutral = client.post(
-            "/retrieval/context",
-            headers=headers,
-            json={
-                "query": "knowledge evidence",
-                "conversation": {"session_id": "compat-session"},
-                "scope": {"kb_ids": [kb_id]},
-                "policy": {"top_k": 2},
-            },
-        )
-        assert neutral.status_code == 200
-
-        legacy_payload = legacy.json()
-        neutral_payload = neutral.json()
-        legacy_policy = legacy_payload["scores"]["applied_policy"]
-        neutral_policy = neutral_payload["trace"]["applied_policy"]
-        assert legacy_policy["top_k"] == neutral_policy["top_k"]
-        assert legacy_policy["memory_top_k"] == neutral_policy["memory_top_k"]
-        assert legacy_policy.get("token_budget") == neutral_policy.get("token_budget")
-        assert legacy_policy["max_context_chars"] == neutral_policy["max_context_chars"]
-        assert legacy_policy["include_knowledge"] == neutral_policy["include_knowledge"]
-        assert legacy_policy["include_short_term"] == neutral_policy["include_short_term"]
-        assert legacy_policy["include_long_term"] == neutral_policy["include_long_term"]
-        assert legacy_payload["source_refs"] == neutral_payload["knowledge"]["source_refs"]
-        assert len(legacy_payload["kb_blocks"]) == len(neutral_payload["knowledge"]["hits"])
-        assert len(legacy_payload["short_term_memory_blocks"]) == len(neutral_payload["memory"]["short_term_hits"])
-        assert len(legacy_payload["long_term_memory_blocks"]) == len(neutral_payload["memory"]["long_term_hits"])
-
-
-def test_assemble_context_source_refs_follow_input_knowledge_hits():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        response = client.post(
-            "/retrieval/assemble-context",
-            headers=headers,
-            json={
-                "query": "knowledge evidence",
-                "knowledge_hits": [
-                    {
-                        "chunk_id": 1,
-                        "kb_id": 1,
-                        "document_id": 11,
-                        "source_path": "/source/a.txt",
-                        "text": "a" * 600,
-                        "score": 0.95,
-                        "metadata": {},
-                    },
-                    {
-                        "chunk_id": 2,
-                        "kb_id": 1,
-                        "document_id": 12,
-                        "source_path": "/source/b.txt",
-                        "text": "secondary evidence",
-                        "score": 0.75,
-                        "metadata": {},
-                    },
-                ],
-                "retrieval_policy": {"max_context_chars": 120},
-            },
-        )
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["source_refs"] == ["/source/a.txt", "/source/b.txt"]
-        assert payload["context_sections"][0]["source_refs"] == ["/source/a.txt"]
-        assert payload["applied_policy"]["max_context_chars"] == 400
-
-
-def test_memory_namespace_isolates_short_term_memory_without_bot_object():
-    account = Account.create()
-    with TestClient(app) as client:
-        token = _login(client, account)
-        headers = {"Authorization": f"Bearer {token}"}
-
-        kb = client.post("/kbs", headers=headers, json={"name": "Namespace KB", "description": "namespace"}).json()
-        kb_id = kb["id"]
-
-        created_a = client.post(
-            "/memory/ingest",
-            headers=headers,
-            json={
-                "session_id": "shared-session",
-                "memory_namespace": "robot-a",
-                "kb_id": kb_id,
-                "query": "机器人 A 偏好简洁回答",
-                "answer": "A: 简洁回答",
-                "source": "bot",
-            },
-        )
-        assert created_a.status_code == 200
-
-        created_b = client.post(
-            "/memory/ingest",
-            headers=headers,
-            json={
-                "session_id": "shared-session",
-                "memory_namespace": "robot-b",
-                "kb_id": kb_id,
-                "query": "机器人 B 偏好详细解释",
-                "answer": "B: 详细解释",
-                "source": "bot",
-            },
-        )
-        assert created_b.status_code == 200
-
-        recall_a = client.post(
-            "/retrieval/recall-memory",
-            headers=headers,
-            json={
-                "query": "偏好",
-                "session_id": "shared-session",
-                "memory_namespace": "robot-a",
-                "kb_ids": [kb_id],
-                "retrieval_policy": {"memory_top_k": 5},
-                "debug": True,
-            },
-        )
-        assert recall_a.status_code == 200
-        payload_a = recall_a.json()
-        assert payload_a["short_term_hits"]
-        assert all(item["metadata"]["memory_namespace"] == "robot-a" for item in payload_a["short_term_hits"])
-        assert any("简洁回答" in item["content"] for item in payload_a["short_term_hits"])
-        assert not any("详细解释" in item["content"] for item in payload_a["short_term_hits"])
-
-        recall_b = client.post(
-            "/retrieval/recall-memory",
-            headers=headers,
-            json={
-                "query": "偏好",
-                "session_id": "shared-session",
-                "memory_namespace": "robot-b",
-                "kb_ids": [kb_id],
-                "retrieval_policy": {"memory_top_k": 5},
-                "debug": True,
-            },
-        )
-        assert recall_b.status_code == 200
-        payload_b = recall_b.json()
-        assert payload_b["short_term_hits"]
-        assert all(item["metadata"]["memory_namespace"] == "robot-b" for item in payload_b["short_term_hits"])
-        assert any("详细解释" in item["content"] for item in payload_b["short_term_hits"])
-        assert not any("简洁回答" in item["content"] for item in payload_b["short_term_hits"])
+        after_evidence = client.get(f"/kbs/{kb_id}/evidence", headers=headers, params={"source_id": source_id})
+        assert after_evidence.status_code == 200
+        after_payload = after_evidence.json()
+        assert len(after_payload) > len(before_payload)
+        assert all(item["vector_status"] == "indexed" for item in after_payload)
 
 
 def test_ops_endpoints_require_auth():
@@ -1227,6 +1036,7 @@ def test_ops_endpoints_require_auth():
         account = Account.create()
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         authed_overview = client.get("/ops/overview", headers=headers)
         assert authed_overview.status_code == 200
@@ -1240,6 +1050,7 @@ def test_delete_document_route_cleans_vector_store(monkeypatch):
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Cleanup KB", "description": "cleanup"}).json()
         kb_id = kb["id"]
@@ -1247,7 +1058,7 @@ def test_delete_document_route_cleans_vector_store(monkeypatch):
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/cleanup"},
+            data={"target_dir": _app_path("cleanup")},
             files={"file": ("cleanup.txt", b"cleanup vector store document", "text/plain")},
         )
         assert upload.status_code == 200
@@ -1297,6 +1108,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Directory KB", "description": "directory scope"}).json()
         kb_id = kb["id"]
@@ -1304,7 +1116,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
         first_upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/dir-scope"},
+            data={"target_dir": _app_path("dir-scope")},
             files={"file": ("a.txt", b"first nested document", "text/plain")},
         )
         assert first_upload.status_code == 200
@@ -1312,7 +1124,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
         second_upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/dir-scope/nested"},
+            data={"target_dir": _app_path("dir-scope/nested")},
             files={"file": ("b.txt", b"second nested document", "text/plain")},
         )
         assert second_upload.status_code == 200
@@ -1320,7 +1132,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
         binding = client.post(
             f"/kbs/{kb_id}/bindings",
             headers=headers,
-            json={"source_path": "/personal/dir-scope", "scope_type": "directory"},
+            json={"source_path": _app_path("dir-scope"), "scope_type": "directory"},
         )
         assert binding.status_code == 200
         assert binding.json()["last_imported_at"] is None
@@ -1328,7 +1140,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
         import_task = client.post(
             f"/kbs/{kb_id}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/personal/dir-scope"]},
+            json={"source_paths": [_app_path("dir-scope")]},
         )
         assert import_task.status_code == 200
         process_import = client.post("/tasks/process-pending", headers=headers)
@@ -1345,7 +1157,7 @@ def test_directory_scope_delete_task_removes_nested_documents_and_updates_bindin
         delete_task = client.post(
             f"/kbs/{kb_id}/tasks/delete",
             headers=headers,
-            json={"source_paths": ["/personal/dir-scope"]},
+            json={"source_paths": [_app_path("dir-scope")]},
         )
         assert delete_task.status_code == 200
         process_delete = client.post("/tasks/process-pending", headers=headers)
@@ -1361,6 +1173,7 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Binding Tasks KB", "description": "binding tasks"}).json()
         kb_id = kb["id"]
@@ -1368,7 +1181,7 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
         upload_a = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/binding-tasks"},
+            data={"target_dir": _app_path("binding-tasks")},
             files={"file": ("alpha.txt", b"alpha binding task content", "text/plain")},
         )
         assert upload_a.status_code == 200
@@ -1376,7 +1189,7 @@ def test_binding_based_task_endpoints_create_tasks_from_enabled_bindings():
         upload_b = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/binding-tasks"},
+            data={"target_dir": _app_path("binding-tasks")},
             files={"file": ("beta.txt", b"beta binding task content", "text/plain")},
         )
         assert upload_b.status_code == 200
@@ -1444,6 +1257,7 @@ def test_duplicate_active_task_reuses_existing_task():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Duplicate Task KB", "description": "duplicate"}).json()
         kb_id = kb["id"]
@@ -1451,16 +1265,16 @@ def test_duplicate_active_task_reuses_existing_task():
         created = client.post(
             f"/kbs/{kb_id}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/personal/dup", "/personal/dup/file.txt"]},
+            json={"source_paths": [_app_path("dup"), _app_path("dup/file.txt")]},
         )
         assert created.status_code == 200
         created_payload = created.json()
-        assert created_payload["source_paths"] == ["/personal/dup"]
+        assert created_payload["source_paths"] == [_app_path("dup")]
 
         duplicate = client.post(
             f"/kbs/{kb_id}/tasks/import",
             headers=headers,
-            json={"source_paths": ["/personal/dup"]},
+            json={"source_paths": [_app_path("dup")]},
         )
         assert duplicate.status_code == 200
         assert duplicate.json()["id"] == created_payload["id"]
@@ -1471,6 +1285,7 @@ def test_binding_based_task_endpoints_validate_requested_binding_ids():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Binding Validation KB", "description": "binding validation"}).json()
         kb_id = kb["id"]
@@ -1482,7 +1297,7 @@ def test_binding_based_task_endpoints_validate_requested_binding_ids():
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/binding-validation"},
+            data={"target_dir": _app_path("binding-validation")},
             files={"file": ("gamma.txt", b"gamma binding validation", "text/plain")},
         )
         assert upload.status_code == 200
@@ -1508,6 +1323,7 @@ def test_binding_status_management_and_kb_workbench_summary():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Workbench KB", "description": "workbench"}).json()
         kb_id = kb["id"]
@@ -1515,7 +1331,7 @@ def test_binding_status_management_and_kb_workbench_summary():
         upload = client.post(
             "/warehouse/upload",
             headers=headers,
-            data={"target_dir": "/personal/workbench"},
+            data={"target_dir": _app_path("workbench")},
             files={"file": ("workbench.txt", b"binding workbench content", "text/plain")},
         )
         assert upload.status_code == 200

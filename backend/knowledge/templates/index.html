@@ -4,7 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>knowledge console</title>
-    <link rel="stylesheet" href="/static/css/console.css" />
+    <link rel="stylesheet" href="/static/css/console.css?v={{ console_asset_version }}" />
+    <script>
+      window.__KNOWLEDGE_CONFIG__ = {
+        warehouse_app_id: {{ warehouse_app_id | tojson }},
+        warehouse_app_root: {{ warehouse_app_root | tojson }},
+        warehouse_upload_dir: {{ warehouse_upload_dir | tojson }},
+        warehouse_base_url: {{ warehouse_base_url | tojson }},
+        warehouse_webdav_prefix: {{ warehouse_webdav_prefix | tojson }},
+      };
+    </script>
   </head>
   <body>
     <div id="app-root" class="layout">
@@ -34,8 +43,7 @@
             <button class="nav-item" data-view-target="warehouse">资产仓库</button>
             <button class="nav-item" data-view-target="tasks">导入任务</button>
             <button class="nav-item" data-view-target="documents">文档与切片</button>
-            <button class="nav-item" data-view-target="memory">记忆</button>
-            <button class="nav-item" data-view-target="retrieval">检索与上下文</button>
+            <button class="nav-item" data-view-target="search-lab">检索调试</button>
             <button class="nav-item" data-view-target="ops">运维状态</button>
             <button class="nav-item" data-view-target="guides">接入指引</button>
           </div>
@@ -44,7 +52,7 @@
         <div class="nav-card">
           <p><strong>当前选中知识库</strong></p>
           <p id="selected-kb-name">未选择</p>
-          <p id="selected-kb-desc" class="muted">请选择一个知识库后继续导入和检索。</p>
+          <p id="selected-kb-desc" class="muted">请选择一个知识库后继续来源治理、知识项管理与发布。</p>
         </div>
       </aside>
 
@@ -52,12 +60,12 @@
         <section class="topbar">
           <div>
             <h1>knowledge 管理控制台</h1>
-            <div class="topbar-meta">前台优先版，围绕真实 `warehouse` 资产浏览、上传、导入、记忆与检索做联调测试。</div>
+            <div class="topbar-meta">知识运营控制台，围绕来源、证据、知识项、发布、服务授权与检索审计做联调验证。</div>
           </div>
           <div class="toolbar">
             <button class="secondary" id="jump-dashboard">概览</button>
             <button class="secondary" id="jump-warehouse">资产仓库</button>
-            <button class="secondary" id="jump-retrieval">检索</button>
+            <button class="secondary" id="jump-search-lab">检索调试</button>
           </div>
           <div class="status-pills">
             <span class="pill" id="pill-wallet">钱包：未登录</span>
@@ -114,19 +122,19 @@
               <div class="feature-grid">
                 <div class="feature-item">
                   <div class="feature-title">1. 资产接入</div>
-                  <div class="feature-text">自动连接 `warehouse`，支持浏览 `personal` / `apps`，并将个人上传仍然落到资产仓库。</div>
+                  <div class="feature-text">通过受限 WebDAV `ak/sk` 接入 `warehouse`，只访问当前 Knowledge App 目录下被显式授权的资产。</div>
                 </div>
                 <div class="feature-item">
                   <div class="feature-title">2. 索引建库</div>
                   <div class="feature-text">按文件类型切块，生成 embedding，写入向量库，并维护导入任务明细与重试能力。</div>
                 </div>
                 <div class="feature-item">
-                  <div class="feature-title">3. 记忆管理</div>
-                  <div class="feature-text">支持长期记忆与短期记忆管理，并可在检索/对话后自动沉淀关键上下文。</div>
+                  <div class="feature-title">3. 知识项治理</div>
+                  <div class="feature-text">支持候选知识项、人工知识项、修订与证据关联，避免退回 chunk 主叙事。</div>
                 </div>
                 <div class="feature-item">
-                  <div class="feature-title">4. 检索供给</div>
-                  <div class="feature-text">为 bot / chat 提供检索结果和 retrieval-context，而不是直接替代对话服务。</div>
+                  <div class="feature-title">4. 发布与授权</div>
+                  <div class="feature-text">以发布快照和服务授权作为稳定服务读面，并提供检索调试与审计能力。</div>
                 </div>
               </div>
             </div>
@@ -137,10 +145,11 @@
               </div>
               <div class="workflow-steps">
                 <div class="workflow-step"><strong>Step 1</strong><span>钱包登录</span></div>
-                <div class="workflow-step"><strong>Step 2</strong><span>浏览 / 上传资产</span></div>
-                <div class="workflow-step"><strong>Step 3</strong><span>绑定到知识库</span></div>
-                <div class="workflow-step"><strong>Step 4</strong><span>导入并切块索引</span></div>
-                <div class="workflow-step"><strong>Step 5</strong><span>检索 / 记忆 / 上下文供给</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>导入读凭证 / 写凭证</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>按凭证浏览 / 上传资产</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>来源扫描与证据构建</span></div>
+                <div class="workflow-step"><strong>Step 5</strong><span>知识项审核与工作区整理</span></div>
+                <div class="workflow-step"><strong>Step 6</strong><span>发布、授权与检索审计</span></div>
               </div>
             </div>
           </div>
@@ -196,22 +205,60 @@
                   <button class="secondary" id="refresh-bindings">刷新</button>
                 </div>
               </div>
-              <div class="inline-form">
-                <div class="path-input-wrap">
-                  <input id="binding-path" data-path-field="binding-path" placeholder="例如 /personal/uploads/a.txt 或 /apps/your.app/" />
+              <div class="form-grid binding-form">
+                <div class="field-stack">
+                  <label for="binding-path" class="field-label">绑定源路径</label>
+                  <div class="path-input-wrap">
+                    <input id="binding-path" data-path-field="binding-path" placeholder="例如 {{ warehouse_upload_dir }}/a.txt" />
+                  </div>
                 </div>
-                <button id="add-binding">绑定</button>
+                <div class="field-stack">
+                  <label for="binding-credential-id" class="field-label">读凭证</label>
+                  <select id="binding-credential-id">
+                    <option value="">选择读凭证</option>
+                  </select>
+                </div>
+                <div class="field-stack">
+                  <label for="binding-scope-type" class="field-label">绑定范围</label>
+                  <select id="binding-scope-type">
+                    <option value="auto">自动判断</option>
+                    <option value="directory">目录</option>
+                    <option value="file">文件</option>
+                  </select>
+                </div>
+                <div class="toolbar">
+                  <button class="secondary" id="use-current-browse-for-binding">使用当前浏览路径</button>
+                  <button id="add-binding">绑定</button>
+                </div>
               </div>
-              <div class="helper">只允许绑定 `personal` 或 `apps/<appId>` 下的路径。点击输入框可直接从当前仓库目录选择。</div>
+              <div class="helper">绑定源必须选择一把已导入的读凭证；路径只能落在当前 Knowledge App 目录且位于该凭证根路径下。</div>
               <div class="list" id="binding-list"></div>
             </div>
 
             <div class="card">
               <div class="section-header">
-                <h2>知识库工作台</h2>
+                <h2>读凭证管理</h2>
               </div>
-              <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
+              <div class="form-grid">
+                <input id="read-credential-key-id" placeholder="ak_xxx" />
+                <input id="read-credential-key-secret" placeholder="sk_xxx" />
+                <div class="path-input-wrap">
+                  <input id="read-credential-root-path" data-path-field="read-credential-root-path" placeholder="例如 {{ warehouse_app_root }}/library" />
+                </div>
+                <div class="toolbar">
+                  <button id="save-read-credential">导入读凭证</button>
+                </div>
+              </div>
+              <div class="helper">建议一把读凭证只服务一个绑定源，不复用到多个无关目录。</div>
+              <div class="list" id="read-credential-list"></div>
             </div>
+          </div>
+
+          <div class="card">
+            <div class="section-header">
+              <h2>知识库工作台</h2>
+            </div>
+            <div id="kb-workbench" class="empty">请选择知识库后查看绑定状态、最近任务和同步建议。</div>
           </div>
         </section>
 
@@ -221,14 +268,17 @@
               <div class="section-header">
                 <h2>浏览 warehouse</h2>
                 <div class="toolbar">
-                  <button class="secondary" id="browse-personal-root">个人资产</button>
-                  <button class="secondary" id="browse-apps-root">应用资产</button>
+                  <button class="secondary" id="browse-app-root">Knowledge App 根目录</button>
+                  <button class="secondary" id="browse-upload-root">uploads</button>
                 </div>
               </div>
               <div class="inline-form">
                 <div class="path-input-wrap">
-                  <input id="browse-path" data-path-field="browse-path" value="/personal" />
+                  <input id="browse-path" data-path-field="browse-path" value="{{ warehouse_app_root }}" />
                 </div>
+                <select id="warehouse-access-source">
+                  <option value="">选择浏览凭证</option>
+                </select>
                 <button id="browse-warehouse">浏览</button>
               </div>
               <div class="inline-form" style="margin-top: 10px">
@@ -236,7 +286,7 @@
                 <button class="secondary" id="clear-warehouse-filter">清空</button>
               </div>
               <div id="warehouse-breadcrumbs" class="breadcrumbs"></div>
-              <div class="helper">当前浏览路径：<span id="current-browse-path">/personal</span></div>
+              <div class="helper">当前浏览路径：<span id="current-browse-path">{{ warehouse_app_root }}</span></div>
               <div class="table-shell">
                 <div class="table-header warehouse-table">
                   <div>名称</div>
@@ -251,19 +301,43 @@
 
             <div class="card">
               <div class="section-header">
-                <h2>资产详情 / 上传</h2>
+                <h2>写凭证 / 上传</h2>
               </div>
+              <div class="hint-box">
+                如果当前还没有可用 `ak/sk`，可以先通过一次性 `warehouse` 前台授权，自动创建 Knowledge App 目录并回填凭证。
+              </div>
+              <div class="toolbar">
+                <button id="bootstrap-warehouse-uploads">连接 warehouse 初始化 uploads 读写凭证</button>
+                <button id="bootstrap-warehouse-app-root" class="secondary">连接 warehouse 初始化 app 根写凭证</button>
+                <button id="clear-warehouse-temp-session" class="ghost">清理临时会话</button>
+              </div>
+              <div id="warehouse-bootstrap-status" class="detail-list empty">尚未连接临时 warehouse 会话。</div>
+              <hr />
+              <div class="form-grid">
+                <input id="write-credential-key-id" placeholder="ak_xxx" />
+                <input id="write-credential-key-secret" placeholder="sk_xxx" />
+                <div class="path-input-wrap">
+                  <input id="write-credential-root-path" data-path-field="write-credential-root-path" value="{{ warehouse_upload_dir }}" />
+                </div>
+                <div class="toolbar">
+                  <button id="save-write-credential">保存写凭证</button>
+                  <button id="delete-write-credential" class="danger">删除写凭证</button>
+                </div>
+              </div>
+              <div class="helper">写凭证单独用于当前 Knowledge App 目录的上传/写入，不参与绑定源读取。</div>
+              <div class="list" id="write-credential-list"></div>
+              <hr />
               <div class="form-grid">
                 <div class="path-input-wrap">
-                  <input id="target-dir" data-path-field="target-dir" value="/personal/uploads" />
+                  <input id="target-dir" data-path-field="target-dir" value="{{ warehouse_upload_dir }}" />
                 </div>
                 <input id="upload-file" type="file" />
                 <div class="toolbar">
-                  <button id="upload-personal">上传到 personal</button>
+                  <button id="upload-app">上传到 uploads</button>
                   <button class="secondary" id="refresh-uploads">刷新上传记录</button>
                 </div>
               </div>
-              <div class="helper">首版只允许上传到 `warehouse personal`，上传成功后可立即导入知识库。</div>
+              <div class="helper">上传只使用当前写凭证。未配置写凭证时不会回退到钱包代理访问。</div>
               <hr />
               <div id="warehouse-preview" class="empty">点击左侧文件可查看预览，点击目录可进入。</div>
             </div>
@@ -286,7 +360,7 @@
 	              <div class="form-grid">
 	                <input id="task-kb-id" placeholder="目标知识库 ID" />
 	                <div class="path-input-wrap">
-	                  <input id="task-source-path" data-path-field="task-source-path" placeholder="源路径，例如 /personal/uploads/a.txt" />
+	                  <input id="task-source-path" data-path-field="task-source-path" placeholder="源路径，例如 {{ warehouse_upload_dir }}/a.txt" />
 	                </div>
 	                <div class="toolbar">
 	                  <button id="create-import-task">创建导入任务</button>
@@ -373,140 +447,55 @@
           </div>
         </section>
 
-        <section class="view" data-view="memory">
+        <section class="view" data-view="search-lab">
           <div class="grid-2">
             <div class="card">
               <div class="section-header">
-                <h2>长期记忆</h2>
+                <h2>检索调试</h2>
                 <div class="toolbar">
-                  <button class="secondary" id="refresh-long-memory">刷新</button>
+                  <button id="run-search-lab">对比三路结果</button>
+                  <button class="secondary" id="refresh-search-lab">刷新</button>
                 </div>
               </div>
               <div class="form-grid">
-                <input id="memory-kb-id" placeholder="知识库 ID（可为空）" />
-                <input id="memory-category" value="general" placeholder="category" />
-                <textarea id="memory-content" placeholder="长期记忆内容"></textarea>
-                <div class="toolbar">
-                  <button id="save-memory">写入长期记忆</button>
-                </div>
-              </div>
-              <div class="list" id="long-memory-list"></div>
-            </div>
-
-            <div class="card">
-              <div class="section-header">
-                <h2>短期记忆</h2>
-                <div class="toolbar">
-                  <button class="secondary" id="refresh-short-memory">刷新</button>
-                </div>
-              </div>
-              <div class="form-grid">
-                <input id="short-session-id" placeholder="session_id" value="demo-session" />
-                <input id="short-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
-                <select id="short-memory-type">
-                  <option value="recent_turn">recent_turn</option>
-                  <option value="summary">summary</option>
-                  <option value="temporary_fact">temporary_fact</option>
-                  <option value="recent_preference">recent_preference</option>
+                <input id="search-lab-query" placeholder="输入要调试的 query" />
+                <input id="search-lab-top-k" value="5" placeholder="top_k" />
+                <select id="search-lab-result-view">
+                  <option value="audit">audit</option>
+                  <option value="referenced">referenced</option>
+                  <option value="compact">compact</option>
                 </select>
-                <textarea id="short-memory-content" placeholder="短期记忆内容"></textarea>
+                <select id="search-lab-availability-mode">
+                  <option value="allow_all">allow_all</option>
+                  <option value="healthy_only">healthy_only</option>
+                  <option value="exclude_source_missing">exclude_source_missing</option>
+                </select>
+              </div>
+              <div class="helper">对比 `formal_only / evidence_only / formal_first`，并结合排序解释、来源健康度和发布面审计信息定位问题。</div>
+              <div id="search-lab-compare" class="empty">请选择知识库后输入 query，运行 search lab 对比。</div>
+            </div>
+
+            <div class="card">
+              <div class="section-header">
+                <h2>来源治理</h2>
                 <div class="toolbar">
-                  <button id="save-short-memory">写入短期记忆</button>
+                  <button class="secondary" id="refresh-source-governance">刷新</button>
                 </div>
               </div>
-              <div class="list" id="short-memory-list"></div>
+              <div class="helper">查看 `source_missing / stale` 对当前 KB 的影响范围，以及受影响的 evidence 数量。</div>
+              <div id="search-lab-governance" class="empty">请选择知识库后查看来源治理信息。</div>
             </div>
           </div>
 
           <div class="card">
             <div class="section-header">
-              <h2>自动沉淀记录</h2>
+              <h2>检索审计日志</h2>
               <div class="toolbar">
-                <button class="secondary" id="refresh-memory-ingestions">刷新</button>
+                <button class="secondary" id="refresh-retrieval-logs">刷新</button>
               </div>
             </div>
-            <div class="helper">记录 bot / chat 的自动记忆沉淀结果，以及控制台对记忆的删除操作。</div>
-            <div class="list" id="memory-ingestion-list"></div>
-          </div>
-        </section>
-
-        <section class="view" data-view="retrieval">
-          <div class="grid-2">
-            <div class="card">
-              <div class="section-header">
-                <h2>知识库检索</h2>
-              </div>
-              <div class="form-grid">
-                <input id="search-kb-id" placeholder="检索知识库 ID" />
-                <input id="search-query" placeholder="请输入检索 query" />
-                <div class="toolbar">
-                  <button id="search-kb">检索</button>
-                </div>
-              </div>
-              <div class="table-shell">
-                <div class="table-header search-table">
-                  <div>排名</div>
-                  <div>来源</div>
-                  <div>相似度</div>
-                  <div>片段内容</div>
-                  <div>操作</div>
-                </div>
-                <div class="table-body" id="search-results"></div>
-              </div>
-            </div>
-
-            <div class="card">
-              <div class="section-header">
-                <h2>Retrieval Context</h2>
-              </div>
-              <div class="form-grid">
-                <input id="context-session-id" value="demo-session" placeholder="session_id" />
-                <input id="context-memory-namespace" placeholder="memory_namespace（可选，用于隔离不同机器人）" />
-                <input id="context-kb-ids" placeholder="知识库 ID，多个用逗号分隔" />
-                <input id="context-query" placeholder="query" />
-                <textarea id="context-answer" placeholder="可选：贴入 bot / assistant 最终回答，用于自动沉淀长期/短期记忆"></textarea>
-                <div class="toolbar">
-                  <button id="build-context">生成上下文</button>
-                  <button class="secondary" id="ingest-memory-context">沉淀本轮记忆</button>
-                </div>
-              </div>
-              <div class="helper">推荐流程：先生成上下文，再将最终回答贴入上方输入框，点击“沉淀本轮记忆”。若同一钱包下要验证多个机器人隔离，请给不同机器人填写不同的 `memory_namespace`。</div>
-              <div id="context-results" class="code"></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="view" data-view="ops">
-          <div class="grid-2">
-            <div class="card">
-              <div class="section-header">
-                <h2>运行概览</h2>
-                <div class="toolbar">
-                  <button class="secondary" id="refresh-ops">刷新</button>
-                </div>
-              </div>
-              <div id="ops-overview" class="empty">尚未加载运维状态。</div>
-            </div>
-            <div class="card">
-              <div class="section-header">
-                <h2>存储与模型健康</h2>
-              </div>
-              <div id="ops-stores" class="empty">尚未加载健康状态。</div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="section-header">
-              <h2>Worker 状态</h2>
-            </div>
-            <div class="list" id="ops-workers"></div>
-          </div>
-
-          <div class="card">
-            <div class="section-header">
-              <h2>最近失败任务</h2>
-            </div>
-            <div class="list" id="ops-failures"></div>
+            <div class="helper">服务检索会写入 `RetrievalLog`。可在这里回查 query、release、grant 选择策略与命中摘要。</div>
+            <div class="list" id="search-lab-log-list"></div>
           </div>
         </section>
 
@@ -518,9 +507,10 @@
               </div>
               <div class="workflow-steps">
                 <div class="workflow-step"><strong>Step 1</strong><span>钱包 challenge / verify 登录 `knowledge`，获取 `knowledge JWT`。</span></div>
-                <div class="workflow-step"><strong>Step 2</strong><span>按需调用 `/kbs/{kb_id}/search` 或 `/retrieval-context` 获取知识块。</span></div>
-                <div class="workflow-step"><strong>Step 3</strong><span>bot / chat 生成最终回答后，调用 `/memory/ingest` 自动沉淀记忆。</span></div>
-                <div class="workflow-step"><strong>Step 4</strong><span>后续会话继续复用 `retrieval-context`，系统会同时返回长短期记忆块。</span></div>
+                <div class="workflow-step"><strong>Step 2</strong><span>在 `warehouse` 自行创建受限 `ak/sk`，再导入到 `knowledge` 作为读凭证或写凭证。</span></div>
+                <div class="workflow-step"><strong>Step 3</strong><span>服务侧通过 `POST /service/search*` 读取已发布知识视图。</span></div>
+                <div class="workflow-step"><strong>Step 4</strong><span>管理侧通过 `search-lab`、`retrieval-logs`、`source-governance` 调试命中与健康度。</span></div>
+                <div class="workflow-step"><strong>Step 5</strong><span>如需发布变更，先在工作区更新知识项，再通过 `releases` 与 `grants` 控制读面。</span></div>
               </div>
               <div class="helper">交互式 OpenAPI：`/docs`。仓库文档：`docs/api-integration.md`。</div>
             </div>
@@ -535,27 +525,25 @@
                   <div class="feature-text">`POST /auth/challenge` → `POST /auth/verify`</div>
                 </div>
                 <div class="feature-item">
-                  <div class="feature-title">检索</div>
-                  <div class="feature-text">`POST /kbs/{kb_id}/search`、`POST /retrieval-context`</div>
+                  <div class="feature-title">服务检索</div>
+                  <div class="feature-text">`POST /service/search`、`POST /service/search/formal`、`POST /service/search/evidence`</div>
                 </div>
                 <div class="feature-item">
-                  <div class="feature-title">自动记忆沉淀</div>
-                  <div class="feature-text">`POST /memory/ingest`、`GET /memory/ingestions`</div>
+                  <div class="feature-title">发布与授权</div>
+                  <div class="feature-text">`/releases`、`/grants`、`/service/*`</div>
                 </div>
                 <div class="feature-item">
                   <div class="feature-title">知识库管理</div>
-                  <div class="feature-text">`/kbs`、`/tasks`、`/warehouse/*`、`/memory/*`</div>
+                  <div class="feature-text">`/kbs`、`/sources`、`/assets`、`/evidence`、`/items`、`/tasks`</div>
                 </div>
               </div>
-              <div class="code">POST /memory/ingest
+              <div class="code">POST /service/search
 {
-  "session_id": "chat-session-1",
   "kb_id": 1,
-  "query": "用户希望以后回答更简洁",
-  "answer": "好的，后续我会保持简洁回答。",
-  "source": "bot",
-  "trace_id": "trace-demo",
-  "source_refs": ["/personal/uploads/profile.txt"]
+  "query": "published release truth",
+  "top_k": 5,
+  "result_view": "audit",
+  "availability_mode": "allow_all"
 }</div>
             </div>
           </div>
@@ -566,11 +554,11 @@
                 <h2>产品操作手册</h2>
               </div>
               <div class="workflow-steps">
-                <div class="workflow-step"><strong>1</strong><span>登录钱包后，系统自动尝试绑定 `warehouse personal`。</span></div>
-                <div class="workflow-step"><strong>2</strong><span>在“资产仓库”中浏览或上传文件，再绑定到目标知识库。</span></div>
-                <div class="workflow-step"><strong>3</strong><span>在“导入任务”中创建导入/重建/删除任务并跟踪任务明细。</span></div>
-                <div class="workflow-step"><strong>4</strong><span>在“文档与切片”中核验 chunk，在“检索与上下文”中验证命中效果。</span></div>
-                <div class="workflow-step"><strong>5</strong><span>在“记忆”中查看自动沉淀记录，并按需手工补充或删除记忆。</span></div>
+                <div class="workflow-step"><strong>1</strong><span>登录钱包后，先导入读凭证与写凭证。</span></div>
+                <div class="workflow-step"><strong>2</strong><span>在“资产仓库”中选择浏览凭证；上传操作只走写凭证。</span></div>
+                <div class="workflow-step"><strong>3</strong><span>创建绑定源时选择对应读凭证，后续导入/重建按绑定源使用该凭证读取。</span></div>
+                <div class="workflow-step"><strong>4</strong><span>完成 source scan、evidence build、candidate 生成与人工知识项整理。</span></div>
+                <div class="workflow-step"><strong>5</strong><span>通过 release 发布稳定视图，再为服务创建 grant，并用 search lab 验证结果。</span></div>
               </div>
               <div class="helper">完整手册见 `docs/console-operations.md`。</div>
             </div>
@@ -581,8 +569,8 @@
               </div>
               <div class="feature-grid">
                 <div class="feature-item">
-                  <div class="feature-title">只读资产中心</div>
-                  <div class="feature-text">knowledge 只消费 `warehouse` 资产，不回写知识处理结果。</div>
+                  <div class="feature-title">最小权限访问</div>
+                  <div class="feature-text">读绑定源与写入凭证分离，不再依赖后台长期持有的钱包代理能力。</div>
                 </div>
                 <div class="feature-item">
                   <div class="feature-title">任务治理</div>
@@ -593,8 +581,8 @@
                   <div class="feature-text">暴露 worker、向量库、模型网关与系统就绪状态。</div>
                 </div>
                 <div class="feature-item">
-                  <div class="feature-title">记忆可追踪</div>
-                  <div class="feature-text">自动沉淀事件可回查，便于验证 bot/chat 是否正确回写上下文。</div>
+                  <div class="feature-title">检索可审计</div>
+                  <div class="feature-text">服务搜索会写入 retrieval log，并能对比 formal/evidence 命中与来源健康度。</div>
                 </div>
               </div>
             </div>
@@ -684,8 +672,10 @@
       </div>
     </div>
 
-    <script src="/static/js/kb_workbench.js"></script>
-    <script src="/static/js/tasks_panel.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/kb_workbench.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/tasks_panel.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/wallet.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/warehouse_bridge.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/app.js?v={{ console_asset_version }}"></script>
   </body>
   </html>

@@ -6,7 +6,6 @@ import base64
 import hashlib
 from urllib.parse import urlparse
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,25 +35,14 @@ class Settings(BaseSettings):
     warehouse_gateway_mode: str = "mock"
     warehouse_base_url: str = "https://webdav.yeying.pub"
     warehouse_webdav_prefix: str = "/dav"
-    warehouse_auth_mode: str = "jwt"
-    warehouse_service_bearer: str = ""
-    warehouse_forward_wallet_header: str = "X-End-User-Wallet"
+    warehouse_app_id: str = "knowledge.yeying.pub"
+    warehouse_apps_prefix: str = "/apps"
     warehouse_mock_root: str = str(Path(__file__).resolve().parents[3] / ".mock_warehouse")
     token_encryption_secret: str = ""
-    warehouse_ucan_audience: str = "did:web:webdav.yeying.pub"
-    warehouse_ucan_resource: str = "profile"
-    warehouse_ucan_action: str = "read"
-    warehouse_ucan_chain_id: int = 1
-    warehouse_ucan_siwe_domain: str = "knowledge.yeying.pub"
-    warehouse_ucan_siwe_uri: str = "https://knowledge.yeying.pub"
-    warehouse_ucan_bootstrap_ttl_seconds: int = 300
-    warehouse_ucan_root_ttl_hours: int = 168
-    warehouse_ucan_invocation_ttl_minutes: int = 15
 
     vector_store_mode: str = "db"
     weaviate_url: str = "http://127.0.0.1:8080"
     weaviate_index_name: str = "KnowledgeChunk"
-    weaviate_enabled: bool = False
     weaviate_scheme: str = "http"
     weaviate_host: str = ""
     weaviate_port: int = 8080
@@ -66,10 +54,6 @@ class Settings(BaseSettings):
     model_gateway_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 32
-    rerank_enabled: bool = False
-    rerank_model: str = ""
-    rerank_api_base: str = ""
-    rerank_api_key: str = ""
 
     chunk_size: int = 800
     chunk_overlap: int = 120

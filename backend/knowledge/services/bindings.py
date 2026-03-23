@@ -5,7 +5,8 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from knowledge.models import ImportedDocument, ImportTask, KnowledgeBase, SourceBinding
+from knowledge.models import ImportedDocument, ImportTask, KnowledgeBase, SourceBinding, WarehouseAccessCredential
+from knowledge.services.warehouse_access import WarehouseAccessService
 
 
 ACTIVE_TASK_STATUSES = {"pending", "running", "cancel_requested"}
@@ -13,6 +14,9 @@ FAILED_TASK_STATUSES = {"failed", "partial_success"}
 
 
 class BindingService:
+    def __init__(self, warehouse_access_service: WarehouseAccessService | None = None) -> None:
+        self.warehouse_access_service = warehouse_access_service or WarehouseAccessService()
+
     @staticmethod
     def normalize_path(path: str) -> str:
         normalized = "/" + str(path or "/").strip().lstrip("/")
@@ -73,6 +77,13 @@ class BindingService:
                 .order_by(ImportTask.created_at.desc(), ImportTask.id.desc())
             ).all()
         )
+        credential_ids = sorted({int(binding.credential_id) for binding in bindings if binding.credential_id is not None})
+        credentials = {
+            credential.id: credential
+            for credential in db.scalars(
+                select(WarehouseAccessCredential).where(WarehouseAccessCredential.id.in_(credential_ids))
+            ).all()
+        } if credential_ids else {}
 
         summaries: list[dict] = []
         for binding in bindings:
@@ -86,11 +97,13 @@ class BindingService:
                 (document.last_indexed_at for document in matching_documents if document.last_indexed_at is not None),
                 default=None,
             )
+            credential = credentials.get(int(binding.credential_id)) if binding.credential_id is not None else None
             sync_status, status_reason = self._resolve_sync_status(
                 binding=binding,
                 document_count=document_count,
                 active_task_count=active_task_count,
                 latest_task=latest_task,
+                credential=credential,
             )
             summaries.append(
                 {
@@ -99,6 +112,18 @@ class BindingService:
                     "source_type": binding.source_type,
                     "source_path": binding.source_path,
                     "scope_type": binding.scope_type,
+                    "credential_id": binding.credential_id,
+                    "credential_kind": credential.credential_kind if credential is not None else None,
+                    "credential_key_id": credential.key_id if credential is not None else None,
+                    "credential_key_secret_masked": (
+                        self.warehouse_access_service.mask_secret(
+                            self.warehouse_access_service._decrypt(credential.encrypted_key_secret)
+                        )
+                        if credential is not None
+                        else None
+                    ),
+                    "credential_root_path": credential.root_path if credential is not None else None,
+                    "credential_status": credential.status if credential is not None else None,
                     "enabled": binding.enabled,
                     "last_imported_at": binding.last_imported_at,
                     "sync_status": sync_status,
@@ -178,9 +203,16 @@ class BindingService:
         document_count: int,
         active_task_count: int,
         latest_task: ImportTask | None,
+        credential: WarehouseAccessCredential | None,
     ) -> tuple[str, str]:
         if not binding.enabled:
             return "disabled", "binding disabled"
+        if binding.credential_id is None:
+            return "failed", "binding credential missing"
+        if credential is None:
+            return "failed", "binding credential not found"
+        if credential.status != "active":
+            return "failed", f"binding credential {credential.status}"
         if active_task_count > 0:
             return "syncing", "sync task in progress"
         if latest_task is not None and latest_task.status in FAILED_TASK_STATUSES:

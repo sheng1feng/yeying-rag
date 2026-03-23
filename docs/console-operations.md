@@ -6,8 +6,9 @@
 
 1. 打开控制台首页
 2. 点击“钱包登录”
-3. 登录成功后，系统会自动尝试连接 `warehouse personal`
-4. 在首页查看“系统就绪状态”
+3. 登录成功后，先确认“系统就绪状态”
+4. 在“资产仓库”页配置一把写凭证
+5. 在“知识库”页导入一把或多把读凭证
 
 ## 2. 创建知识库
 
@@ -15,19 +16,28 @@
 2. 输入名称、描述和基础检索参数
 3. 点击“创建知识库”
 4. 选中目标知识库作为当前工作对象
-5. 若后续修改 `chunk_size` / `chunk_overlap` / `embedding_model`，控制台会自动为已有文档触发重建
+5. 若后续修改 `chunk_size` / `chunk_overlap` / `embedding_model`，系统会自动为已有文档触发重建，并对现有 source 重新扫描后重建 evidence
 
 ## 3. 上传与绑定资产
 
 1. 进入“资产仓库”
-2. 在 `personal/uploads` 下上传文件
-3. 上传成功后可直接点击“导入”或“定位”
-4. 如果要长期纳入当前知识库，也可在“知识库”页绑定源路径
+2. 如果还没有任何可用 `ak/sk`，先使用“连接 warehouse 初始化 uploads 读写凭证（推荐）”或“连接 warehouse 初始化 app 根写凭证”
+3. 选择浏览凭证，确认当前正在查看的目录
+4. 使用写凭证把文件上传到 `Knowledge App` 的 `uploads/` 目录或其他受支持目录
+5. 上传成功后可直接点击“导入”或“定位”
+6. 如果要长期纳入当前知识库，在“知识库”页选择读凭证并绑定源路径
+
+说明：
+
+- 临时初始化流程会在浏览器中以当前钱包临时连接 `warehouse`，创建 key、绑定目录、执行 `MKCOL` 并自动回填到 `knowledge`
+- 上传只依赖写凭证
+- 绑定源依赖读凭证
+- 绑定路径必须位于当前 app 目录内，并落在所选读凭证的 `root_path` 范围内
 
 ## 4. 导入与任务治理
 
 1. 进入“导入任务”
-2. 填写目标知识库与源路径
+2. 填写目标知识库与源路径；如是手工任务，可按需显式指定读凭证
 3. 创建导入 / 重建 / 删除任务
 4. 在任务列表中查看状态
 5. 点击“详情”查看 task item 成功、跳过、失败明细
@@ -37,24 +47,21 @@
 9. 在“知识库工作台”里查看每个绑定源的 `pending_sync / syncing / indexed / failed / disabled` 状态，并决定下一步导入或重建动作
 10. worker 现在使用数据库租约协调运行状态；如果实例异常退出，租约超时后其他实例可继续接管待处理任务
 
-## 5. 核验文档与切片
+## 5. 核验证据与知识项
 
 1. 进入“文档与切片”
 2. 查看导入后的文档列表
 3. 选中文档查看 chunk 详情
-4. 确认文件类型、chunk 数量与切片内容是否合理
+4. 再通过 `evidence` 与 `items` API 核验证据、候选知识项和正式知识项是否一致
 
-## 6. 检索与自动记忆沉淀
+## 6. 发布、授权与检索审计
 
-1. 进入“检索与上下文”
-2. 填写 `session_id`、可选 `memory_namespace`、`kb_ids` 与 `query`
-3. 点击“生成上下文”
-4. 将 bot / assistant 最终回答粘贴到回答输入框
-5. 点击“沉淀本轮记忆”
-6. 进入“记忆”查看长短期记忆与自动沉淀记录
-7. 在控制台删除长短期记忆后，也会写入同一条记录流，便于回查
-
-如果要验证“同一钱包下多个机器人互不串短期记忆”，可为不同机器人填写不同的 `memory_namespace`，然后分别生成上下文并沉淀记忆。
+1. 先通过 `releases` 发布当前工作区
+2. 通过 `grants` 为服务创建授权
+3. 用 `POST /service/search*` 验证服务读面
+4. 用 `search-lab/compare` 对比 `formal_only / evidence_only / formal_first`
+5. 用 `retrieval-logs` 审计服务查询
+6. 用 `source-governance` 查看 `source_missing / stale` 治理状态
 
 ## 7. 运维排查
 
@@ -68,16 +75,19 @@
 
 说明：`/ops/*` 运维接口需要先登录 `knowledge`，不再对匿名访问开放。
 
-建议的 trace 排查顺序：
+建议的审计排查顺序：
 
-1. 在“检索与上下文”生成结果后记录 `trace_id`
-2. 如果随后调用了 `POST /memory/ingest`，可在“记忆沉淀记录”中按同一 `trace_id` 回查
-3. 如果怀疑索引或任务异常，可结合 `GET /ops/tasks/failures?trace_id=...` 查看是否存在同一 trace 的失败任务
-4. `debug=true` 时重点查看过滤条件、scope 影响、budget 截断与 provider 模式；`debug=false` 不返回这些详细诊断字段
+1. 先确认服务当前命中的 release 与 grant 选择策略
+2. 再查 `retrieval-logs` 看 query、mode、result_summary 与 trace
+3. 如果命中异常，用 `search-lab/compare` 对比 formal/evidence 三路结果
+4. 如果怀疑来源问题，再查 `source-governance`
+5. 如果怀疑任务或索引异常，再结合 `GET /ops/tasks/failures` 与运维状态排查
 
 ## 8. 当前产品边界
 
-- `knowledge` 不回写 `warehouse`
+- `knowledge` 不回写 chunk、embedding 或知识处理结果到 `warehouse`
+- 在配置写凭证和上传文件时，`knowledge` 可能会在写凭证权限范围内创建当前 app 目录或目标上传目录
 - 当前不启用 rerank
-- 自动记忆沉淀首版依赖 bot / chat 显式调用
+- `memory` 仍保留为兼容模块，但不再是控制台主流程
 - `warehouse` 仍是唯一资产中心
+- 旧 `/warehouse/auth/*` 绑定接口已经从当前仓库删除，控制台只保留手工导入读凭证 / 写凭证的主流程

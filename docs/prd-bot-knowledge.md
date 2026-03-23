@@ -119,26 +119,25 @@
 
 ### 7.3 兼容性
 
-- 保留现有 `POST /retrieval-context`
-- 旧接口内部复用新分层逻辑
-- 新旧接口可并存一段时间
+- `memory` 相关接口作为兼容模块保留
+- 旧 retrieval/context 路由不再作为当前分支兼容目标
+- 当前分支以 service search 和 search-lab 作为公开检索面
 
 ## 8. 接口需求
 
-### 8.1 新增接口
+### 8.1 当前分支公开接口
 
-- `POST /retrieval/search`
-- `POST /retrieval/retrieve`
-- `POST /retrieval/recall-memory`
-- `POST /retrieval/assemble-context`
-- `POST /retrieval/generate-context`
-- `POST /retrieval/context`
-- `POST /bot/retrieval-context`
+- `POST /service/search`
+- `POST /service/search/formal`
+- `POST /service/search/evidence`
+- `POST /kbs/{kb_id}/search-lab/compare`
+- `GET /kbs/{kb_id}/retrieval-logs`
+- `GET /kbs/{kb_id}/source-governance`
 
-### 8.2 兼容接口
+### 8.2 当前兼容保留
 
-- `POST /kbs/{kb_id}/search`
-- `POST /retrieval-context`
+- `POST /memory/ingest`
+- `GET /memory/ingestions`
 
 ## 9. 非功能需求
 
@@ -149,9 +148,8 @@
 
 ### 9.2 可用性
 
-- 旧接口兼容
 - 失败任务可重试
-- 检索与上下文接口可输出 trace/debug 信息
+- `service search`、`search-lab` 与 retrieval logs 形成最小排障链路
 
 ### 9.3 可维护性
 
@@ -166,25 +164,25 @@
 
 ### 9.5 可观测性
 
-- 所有新接口返回 `trace_id`
-- debug 模式输出过滤条件、策略与召回说明
-- `trace_id` 可用于关联 retrieval、memory ingest 与最小 ops 排障链路
-- legacy 与标准入口保持语义一致，调试细节只在显式开启时返回
+- `search-lab/compare` 用于比对 formal / evidence / formal_first
+- `retrieval_logs` 用于记录服务读面
+- `source-governance` 用于解释 `source_missing / stale / missing_unconfirmed`
+- `memory/ingest` 的 `trace_id` 由调用方自行传入，不假设 retrieval 响应默认返回该字段
 
 ## 10. 成功指标
 
 - bot/chat 接入方可以只依赖公开 API，而不依赖控制台
-- 新分层接口能覆盖 search / memory / context 的独立调用场景
-- 旧 `retrieval-context` 接口保持可用
-- 新接口具备测试覆盖和文档说明
+- 当前公开接口能覆盖 service search / memory ingest / retrieval 审计场景
+- 当前分支接口与文档保持一致
+- 关键权限边界与检索治理逻辑具备测试覆盖
 
 ## 11. 版本范围
 
 ### 本次版本包含
 
-- 新分层 retrieval APIs
-- 新统一 bot 入口
-- 旧接口兼容复用
+- service search / search-lab / retrieval logs / source-governance
+- source / asset / evidence / item / release / grant 主链路
+- 兼容保留的 memory 能力
 - PRD / 技术方案 / 接入文档更新
 
 ### 本次版本不包含

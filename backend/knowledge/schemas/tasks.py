@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -5,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class TaskCreateRequest(BaseModel):
     source_paths: list[str]
+    credential_id: int | None = None
 
 
 class BindingTaskCreateRequest(BaseModel):
