@@ -62,13 +62,39 @@ class WarehouseAccessService:
         self._validate_key_pair(key_id, key_secret)
         probe_auth = WarehouseRequestAuth.basic(key_id, key_secret)
         probe_path = None
+        last_probe_error: Exception | None = None
         for candidate in self._candidate_probe_paths(normalized_root):
-            exists, _ = self.path_exists_with_auth(wallet_address, candidate, probe_auth)
+            try:
+                exists, _ = self.path_exists_with_auth(wallet_address, candidate, probe_auth)
+            except Exception as exc:  # noqa: BLE001
+                if self.is_auth_error(exc):
+                    last_probe_error = exc
+                    continue
+                raise
             if exists:
                 probe_path = candidate
                 break
         if probe_path is None:
-            raise ValueError(f"warehouse path not accessible with credential: {normalized_root}")
+            try:
+                self.warehouse_gateway.ensure_app_space(
+                    wallet_address,
+                    auth=probe_auth,
+                    base_path=normalized_root,
+                    target_path=normalized_root,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if last_probe_error is not None:
+                    raise last_probe_error
+                raise
+        else:
+            # Bootstrap the app directory tree immediately after validating the write credential
+            # so the first upload does not have to create the app space lazily.
+            self.warehouse_gateway.ensure_app_space(
+                wallet_address,
+                auth=probe_auth,
+                base_path=normalized_root,
+                target_path=normalized_root,
+            )
 
         existing_items = list(
             db.scalars(
@@ -282,22 +308,29 @@ class WarehouseAccessService:
         auth: WarehouseRequestAuth,
     ) -> tuple[bool, str | None]:
         normalized_path = normalize_warehouse_path(path)
-        app_root = warehouse_app_root(self.settings)
-        if normalized_path == app_root:
-            try:
-                entries = self.warehouse_gateway.browse(wallet_address, normalized_path, auth=auth)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    return False, None
+        direct_accessible = False
+        try:
+            entries = self.warehouse_gateway.browse(wallet_address, normalized_path, auth=auth)
+            direct_accessible = True
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                entries = []
+            else:
                 raise
-            if not entries and self.settings.warehouse_gateway_mode == "mock":
-                return True, "directory"
+        if not entries and direct_accessible and self.settings.warehouse_gateway_mode == "mock":
+            return True, "directory"
+        for entry in entries:
+            if normalize_warehouse_path(entry.path) == normalized_path:
+                return True, entry.entry_type
+
         parent = self._parent_path(normalized_path)
         try:
             entries = self.warehouse_gateway.browse(wallet_address, parent, auth=auth)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return False, None
+            if direct_accessible:
+                return True, "directory"
             raise
         for entry in entries:
             if normalize_warehouse_path(entry.path) == normalized_path:
@@ -306,6 +339,8 @@ class WarehouseAccessService:
             for entry in self.warehouse_gateway.browse(wallet_address, normalized_path, auth=auth):
                 if normalize_warehouse_path(entry.path) == normalized_path:
                     return True, entry.entry_type
+        if direct_accessible:
+            return True, "directory"
         return False, None
 
     def mark_access_success(self, resolved: ResolvedWarehouseAccess) -> None:

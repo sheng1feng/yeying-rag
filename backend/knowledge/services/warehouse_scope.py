@@ -50,6 +50,28 @@ def warehouse_app_directories(settings: Settings | None = None) -> list[str]:
     return [warehouse_app_root(current), *(warehouse_app_path(name, current) for name in WAREHOUSE_APP_SUBDIRECTORIES)]
 
 
+def warehouse_path_chain(
+    target_path: str | None,
+    settings: Settings | None = None,
+    *,
+    base_path: str | None = None,
+) -> list[str]:
+    current = _settings(settings)
+    normalized_target = ensure_current_app_path(target_path, "target_path", current)
+    normalized_base = ensure_current_app_path(base_path or warehouse_app_root(current), "base_path", current)
+    if normalized_target != normalized_base and not normalized_target.startswith(f"{normalized_base}/"):
+        raise ValueError(f"target_path must be under {normalized_base}")
+    if normalized_target == normalized_base:
+        return [normalized_base]
+
+    base_parts = normalized_base.strip("/").split("/")
+    target_parts = normalized_target.strip("/").split("/")
+    chain = [normalized_base]
+    for index in range(len(base_parts), len(target_parts)):
+        chain.append("/" + "/".join(target_parts[: index + 1]))
+    return chain
+
+
 def is_current_app_path(path: str | None, settings: Settings | None = None) -> bool:
     current = _settings(settings)
     normalized = normalize_warehouse_path(path, warehouse_app_root(current))

@@ -5,6 +5,8 @@ from datetime import timedelta
 import time
 from threading import Event, Thread
 
+from sqlalchemy.exc import OperationalError
+
 from knowledge.core.settings import get_settings
 from knowledge.db.session import session_scope
 from knowledge.models import ImportTask, WorkerStatus
@@ -32,10 +34,19 @@ class TaskHeartbeat:
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
-            with session_scope() as db:
-                alive = self.task_queue.touch_task_heartbeat(db, self.task_id, self.worker_name)
+            try:
+                with session_scope() as db:
+                    alive = self.task_queue.touch_task_heartbeat(db, self.task_id, self.worker_name)
+            except OperationalError as exc:
+                if self._is_transient_lock_error(exc):
+                    continue
+                raise
             if not alive:
                 return
+
+    @staticmethod
+    def _is_transient_lock_error(exc: OperationalError) -> bool:
+        return "database is locked" in str(exc).lower()
 
 
 class Worker:
@@ -93,12 +104,14 @@ class Worker:
         return claimed
 
     def _process_claimed_task(self, task_id: int) -> None:
-        heartbeat = TaskHeartbeat(
-            worker_name=self.settings.worker_name,
-            task_id=task_id,
-            interval_seconds=self.settings.worker_task_heartbeat_interval_seconds,
-        )
-        heartbeat.start()
+        heartbeat = None
+        if self._use_background_heartbeat():
+            heartbeat = TaskHeartbeat(
+                worker_name=self.settings.worker_name,
+                task_id=task_id,
+                interval_seconds=self.settings.worker_task_heartbeat_interval_seconds,
+            )
+            heartbeat.start()
         try:
             ingestion_service = IngestionService()
             with session_scope() as db:
@@ -117,7 +130,8 @@ class Worker:
                 db.commit()
             raise
         finally:
-            heartbeat.stop()
+            if heartbeat is not None:
+                heartbeat.stop()
 
     def _heartbeat(self, status: str, processed_count: int = 0, last_error: str = "") -> None:
         with session_scope() as db:
@@ -146,6 +160,9 @@ class Worker:
         if self.settings.database_url.startswith("sqlite"):
             return 1
         return max(1, int(self.settings.worker_task_concurrency))
+
+    def _use_background_heartbeat(self) -> bool:
+        return not self.settings.database_url.startswith("sqlite")
 
 
 if __name__ == "__main__":

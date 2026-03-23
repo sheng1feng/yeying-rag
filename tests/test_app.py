@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from sqlalchemy.exc import OperationalError
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
+import httpx
 
 from tests.helpers import configure_warehouse_credentials
 
 from knowledge.db.session import engine, session_scope
 from knowledge.main import app
 from knowledge.models import ImportTask
+from knowledge.api.routes_console import CONSOLE_ASSET_VERSION
+from knowledge.services.warehouse import BoundTokenWarehouseGateway, WarehouseFileEntry, WarehouseGateway, WarehouseRequestAuth
+from knowledge.services.warehouse_access import WarehouseAccessService
 from knowledge.services.warehouse_scope import warehouse_app_path, warehouse_app_root, warehouse_default_upload_dir
 from knowledge.utils.time import utc_now
-from knowledge.workers.runner import Worker
+from knowledge.workers.runner import TaskHeartbeat, Worker
 
 
 APP_ROOT = warehouse_app_root()
@@ -33,6 +38,163 @@ def _login(client: TestClient, account) -> str:
     )
     data = verify.json()
     return data["access_token"]
+
+
+def test_console_loads_wallet_adapter_before_app():
+    wallet_ref = f"/static/js/wallet.js?v={CONSOLE_ASSET_VERSION}"
+    bridge_ref = f"/static/js/warehouse_bridge.js?v={CONSOLE_ASSET_VERSION}"
+    app_ref = f"/static/js/app.js?v={CONSOLE_ASSET_VERSION}"
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert 'id="connect-wallet"' in response.text
+        assert "warehouse_base_url:" in response.text
+        assert "warehouse_webdav_prefix:" in response.text
+        wallet_index = response.text.index(wallet_ref)
+        bridge_index = response.text.index(bridge_ref)
+        app_index = response.text.index(app_ref)
+        assert wallet_index < app_index
+        assert bridge_index < app_index
+
+        wallet_script = client.get(wallet_ref)
+        assert wallet_script.status_code == 200
+        assert "window.KnowledgeWallet" in wallet_script.text
+
+        bridge_script = client.get(bridge_ref)
+        assert bridge_script.status_code == 200
+        assert "window.KnowledgeWarehouseBridge" in bridge_script.text
+
+
+def test_read_credential_accepts_directory_scoped_key_without_parent_access():
+    class DirectoryScopedGateway(WarehouseGateway):
+        def browse(self, wallet_address: str, path: str, auth=None) -> list[WarehouseFileEntry]:
+            normalized = str(path).rstrip("/") or "/"
+            if normalized == f"{APP_ROOT}/uploads":
+                return [
+                    WarehouseFileEntry(
+                        path=f"{APP_ROOT}/uploads",
+                        name="uploads",
+                        entry_type="directory",
+                    )
+                ]
+            request = httpx.Request("PROPFIND", f"https://webdav.yeying.pub/dav{normalized}")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        def ensure_app_space(self, wallet_address: str, auth=None, **kwargs) -> None:
+            return None
+
+        def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth=None) -> str:
+            raise NotImplementedError
+
+        def read_file(self, wallet_address: str, path: str, auth=None) -> bytes:
+            raise NotImplementedError
+
+    account = Account.create()
+    service = WarehouseAccessService(warehouse_gateway=DirectoryScopedGateway())
+    with TestClient(app):
+        with session_scope() as db:
+            credential = service.create_read_credential(
+                db,
+                wallet_address=account.address,
+                key_id="ak_test_directory_only",
+                key_secret="sk_test_directory_only",
+                root_path=f"{APP_ROOT}/uploads",
+            )
+            assert credential.root_path == f"{APP_ROOT}/uploads"
+            assert credential.status == "active"
+
+
+def test_write_credential_bootstraps_app_space_on_save():
+    class BootstrapGateway(WarehouseGateway):
+        def __init__(self) -> None:
+            self.ensure_calls: list[tuple[str, str | None, str | None]] = []
+
+        def browse(self, wallet_address: str, path: str, auth=None) -> list[WarehouseFileEntry]:
+            normalized = str(path).rstrip("/") or "/"
+            request = httpx.Request("PROPFIND", f"https://webdav.yeying.pub/dav{normalized}")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        def ensure_app_space(self, wallet_address: str, auth=None, *, base_path=None, target_path=None) -> None:
+            self.ensure_calls.append((wallet_address, base_path, target_path))
+
+        def upload_file(self, wallet_address: str, target_dir: str, file_name: str, content: bytes, auth=None) -> str:
+            raise NotImplementedError
+
+        def read_file(self, wallet_address: str, path: str, auth=None) -> bytes:
+            raise NotImplementedError
+
+    account = Account.create()
+    gateway = BootstrapGateway()
+    service = WarehouseAccessService(warehouse_gateway=gateway)
+    with TestClient(app):
+        with session_scope() as db:
+            credential = service.upsert_write_credential(
+                db,
+                wallet_address=account.address,
+                key_id="ak_test_write_bootstrap",
+                key_secret="sk_test_write_bootstrap",
+                root_path=APP_ROOT,
+            )
+            assert credential.root_path == APP_ROOT
+            assert credential.status == "active"
+    assert gateway.ensure_calls == [(account.address, APP_ROOT, APP_ROOT)]
+
+
+def test_bound_token_gateway_bootstrap_does_not_probe_apps_parent(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        calls.append((method, url))
+        if method == "PROPFIND":
+            return httpx.Response(404, request=httpx.Request(method, url))
+        if method == "MKCOL":
+            return httpx.Response(201, request=httpx.Request(method, url))
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    gateway = BoundTokenWarehouseGateway(base_url="https://webdav.yeying.pub", webdav_prefix="/dav")
+    gateway.ensure_app_space(
+        "0xabc",
+        auth=WarehouseRequestAuth.basic("ak_test_write_bootstrap", "sk_test_write_bootstrap"),
+        base_path=APP_ROOT,
+        target_path=APP_ROOT,
+    )
+
+    urls = [url for _, url in calls]
+    assert "https://webdav.yeying.pub/dav/apps" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub" in urls
+
+
+def test_bound_token_gateway_bootstrap_for_upload_scope_skips_unrelated_dirs(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        calls.append((method, url))
+        if method == "PROPFIND":
+            return httpx.Response(404, request=httpx.Request(method, url))
+        if method == "MKCOL":
+            return httpx.Response(201, request=httpx.Request(method, url))
+        raise AssertionError(f"unexpected method: {method}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    gateway = BoundTokenWarehouseGateway(base_url="https://webdav.yeying.pub", webdav_prefix="/dav")
+    gateway.ensure_app_space(
+        "0xabc",
+        auth=WarehouseRequestAuth.basic("ak_test_write_bootstrap", "sk_test_write_bootstrap"),
+        base_path=UPLOADS_ROOT,
+        target_path=UPLOADS_ROOT,
+    )
+
+    urls = [url for _, url in calls]
+    assert "https://webdav.yeying.pub/dav/apps" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/library" not in urls
+    assert "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/system" not in urls
+    assert urls == [
+        "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/uploads",
+        "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/uploads",
+    ]
 
 
 def test_end_to_end_auth_upload_import_search():
@@ -112,6 +274,185 @@ def test_end_to_end_auth_upload_import_search():
         ops_workers = client.get("/ops/workers", headers=headers)
         assert ops_workers.status_code == 200
         assert len(ops_workers.json()) >= 1
+
+
+def test_upload_succeeds_with_write_credential_scoped_to_uploads_subtree():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        write_response = client.post(
+            "/warehouse/credentials/write",
+            headers=headers,
+            json={
+                "key_id": "ak_test_write_uploads_only",
+                "key_secret": "sk_test_write_uploads_only",
+                "root_path": UPLOADS_ROOT,
+            },
+        )
+        assert write_response.status_code == 200
+        assert write_response.json()["root_path"] == UPLOADS_ROOT
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": _app_path("uploads/scoped/nested")},
+            files={"file": ("scoped.txt", b"uploads scoped write credential", "text/plain")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["warehouse_path"] == _app_path("uploads/scoped/nested/scoped.txt")
+
+
+def test_binding_auto_scope_resolves_directory_paths():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        configure_warehouse_credentials(client, headers)
+
+        kb = client.post("/kbs", headers=headers, json={"name": "Auto Binding KB", "description": "auto"}).json()
+        kb_id = kb["id"]
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": _app_path("uploads/auto-binding")},
+            files={"file": ("source.txt", b"auto scope binding", "text/plain")},
+        )
+        assert upload.status_code == 200
+
+        bind = client.post(
+            f"/kbs/{kb_id}/bindings",
+            headers=headers,
+            json={"source_path": _app_path("uploads/auto-binding"), "scope_type": "auto"},
+        )
+        assert bind.status_code == 200
+        assert bind.json()["scope_type"] == "directory"
+
+
+def test_backend_proxy_bootstrap_initializes_warehouse_without_browser_cors(monkeypatch):
+    account = Account.create()
+    created_paths: set[str] = set()
+    access_key_counter = {"value": 0}
+    requested_addresses: list[str] = []
+
+    def fake_request(method: str, url: str, **kwargs):
+        method = method.upper()
+        if url.endswith("/api/v1/public/auth/challenge") and method == "POST":
+            body = kwargs.get("json") or {}
+            requested_addresses.append(str(body.get("address") or ""))
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": str(body.get("address") or "").lower(),
+                        "challenge": "warehouse bootstrap challenge",
+                        "nonce": "nonce-1",
+                        "issuedAt": 1,
+                        "expiresAt": 2,
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/auth/verify") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": account.address.lower(),
+                        "token": "warehouse-bearer-token",
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/create") and method == "POST":
+            access_key_counter["value"] += 1
+            idx = access_key_counter["value"]
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "id": f"uuid-{idx}",
+                    "name": f"key-{idx}",
+                    "keyId": f"ak_bootstrap_{idx}",
+                    "keySecret": f"sk_bootstrap_{idx}",
+                    "permissions": ["read", "create", "update"] if idx == 1 else ["read"],
+                    "bindingPaths": [],
+                    "status": "active",
+                    "createdAt": "2026-03-24T00:00:00+08:00",
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/bind") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                content=b'{"message":"bound successfully"}',
+            )
+
+        target = url.replace("https://webdav.yeying.pub/dav", "", 1)
+        auth_header = (kwargs.get("headers") or {}).get("Authorization", "")
+        if method == "PROPFIND":
+            if auth_header.startswith("Bearer "):
+                status = 207 if target in created_paths else 404
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+            if auth_header.startswith("Basic "):
+                status = 207 if target in created_paths else 404
+                if status == 207:
+                    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/dav{target}</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection /></d:resourcetype>
+        <d:getcontentlength>0</d:getcontentlength>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"""
+                    return httpx.Response(status, request=httpx.Request(method, url), text=xml)
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+        if method == "MKCOL":
+            created_paths.add(target.rstrip("/") or "/")
+            return httpx.Response(201, request=httpx.Request(method, url))
+
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        challenge = client.post("/warehouse/bootstrap/challenge", headers=headers)
+        assert challenge.status_code == 200
+        message = encode_defunct(text=challenge.json()["challenge"])
+        signed = Account.sign_message(message, account.key)
+
+        initialize = client.post(
+            "/warehouse/bootstrap/initialize",
+            headers=headers,
+            json={"mode": "uploads_bundle", "signature": signed.signature.hex()},
+        )
+        assert initialize.status_code == 200
+        payload = initialize.json()
+        assert payload["target_path"] == UPLOADS_ROOT
+        assert payload["write_key_id"] == "ak_bootstrap_1"
+        assert payload["read_key_id"] == "ak_bootstrap_2"
+        assert requested_addresses == [account.address]
+
+        write_credential = client.get("/warehouse/credentials/write", headers=headers)
+        assert write_credential.status_code == 200
+        assert write_credential.json()["credential"]["key_id"] == "ak_bootstrap_1"
+
+        read_credentials = client.get("/warehouse/credentials/read", headers=headers)
+        assert read_credentials.status_code == 200
+        assert read_credentials.json()[0]["key_id"] == "ak_bootstrap_2"
 
 
 def test_warehouse_app_only_paths_reject_personal_scope():
@@ -352,6 +693,20 @@ def test_worker_reclaims_stale_running_task_and_reprocesses_it():
         assert task_after.status_code == 200
         assert task_after.json()["status"] in {"failed", "partial_success", "succeeded"}
         assert task_after.json()["claimed_by"] is None
+
+
+def test_worker_disables_background_heartbeat_for_sqlite():
+    worker = Worker()
+    assert worker._use_background_heartbeat() is False
+
+
+def test_task_heartbeat_treats_sqlite_lock_as_transient():
+    exc = OperationalError(
+        statement="UPDATE import_tasks SET heartbeat_at=?",
+        params=(),
+        orig=Exception("database is locked"),
+    )
+    assert TaskHeartbeat._is_transient_lock_error(exc) is True
 
 
 def test_cancel_pending_task_marks_canceled_without_processing():

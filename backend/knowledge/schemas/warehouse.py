@@ -12,6 +12,30 @@ class WarehouseCredentialCreateRequest(BaseModel):
     root_path: str
 
 
+class WarehouseBootstrapChallengeResponse(BaseModel):
+    wallet_address: str
+    challenge: str
+    nonce: str | None = None
+    issued_at: int | None = None
+    expires_at: int | None = None
+
+
+class WarehouseBootstrapInitializeRequest(BaseModel):
+    mode: Literal["uploads_bundle", "app_root_write"] = "uploads_bundle"
+    signature: str
+
+
+class WarehouseBootstrapInitializeResponse(BaseModel):
+    mode: Literal["uploads_bundle", "app_root_write"]
+    mode_label: str
+    wallet_address: str
+    target_path: str
+    write_key_id: str
+    read_key_id: str | None = None
+    write_credential: "WarehouseCredentialSummary"
+    read_credential: "WarehouseCredentialSummary | None" = None
+
+
 class WarehouseCredentialSummary(BaseModel):
     id: int
     credential_kind: Literal["read", "read_write"]
@@ -70,7 +94,7 @@ class WarehouseBrowseResponse(BaseModel):
 
 class SourceBindingCreateRequest(BaseModel):
     source_path: str
-    scope_type: Literal["file", "directory"] = "file"
+    scope_type: Literal["auto", "file", "directory"] = "auto"
     credential_id: int | None = None
 
 

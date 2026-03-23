@@ -58,6 +58,28 @@
 
 ## 在 `knowledge` 中导入凭证
 
+### 临时初始化（推荐冷启动）
+
+如果当前还没有可用的 `ak/sk`，并且 `warehouse` 中也还没有 `knowledge` 对应的 app 目录，可先在 `knowledge` 控制台里使用：
+
+- “连接 warehouse 初始化 uploads 读写凭证（推荐）”
+- 或“连接 warehouse 初始化 app 根写凭证”
+
+该流程会在浏览器里临时连接 `warehouse`，自动完成：
+
+1. 以当前钱包登录 `warehouse`
+2. 创建 access key
+3. 将 future path 绑定到 key
+4. 在 `warehouse` 中创建 `/apps/knowledge.yeying.pub` 或 `uploads/` 目录
+5. 把生成的 `ak/sk` 自动回填到 `knowledge`
+
+说明：
+
+- 临时 `warehouse` token 只保存在当前浏览器 `sessionStorage`
+- 不会落到 `knowledge` 后端数据库
+- 推荐优先使用 `uploads` 模式，它会同时回填一把 uploads 写凭证和一把 uploads 读凭证
+- `app 根写凭证` 模式默认只回填写凭证，后续读凭证仍建议按目录最小权限单独创建
+
 ### 导入读凭证
 
 控制台位置：
@@ -101,6 +123,13 @@
 
 - 浏览 app 目录
 - 上传文件
+
+当前保存行为：
+
+- 保存成功后，后端会立即尝试对当前写凭证的 `root_path` 做最小 bootstrap
+- 如果 `root_path` 是 app 根目录，会确保 app 根目录可用
+- 如果 `root_path` 是 `uploads/` 或其下子目录，只会尝试处理该写口范围内的最小目录链，不再额外创建无关目录
+- 如果这把 key 连自己的 `root_path` 都无法访问或创建，保存会直接失败
 
 ## 浏览、上传、绑定的区别
 
@@ -164,6 +193,8 @@
 说明：
 
 - 当前上传和读取是两套能力，不建议只配写凭证后长期依赖读回退
+- 如果写 key 只覆盖 `uploads/`，推荐把 `root_path` 直接填成 `/apps/knowledge.yeying.pub/uploads`
+- 如果希望第一次保存写凭证时就自动建立整个 app 根目录，写 key 需要覆盖 `/apps/knowledge.yeying.pub`
 
 ### 场景 2：绑定现有目录做长期同步
 
@@ -188,6 +219,34 @@
 - 绑定所依赖的读凭证是否仍为 `active`
 - `root_path` 是否仍覆盖当前 `source_path`
 - 远端 key 是否被修改或失效
+
+## 常见报错排查
+
+### 导入或保存凭证时报 `401 Unauthorized`
+
+这在当前 `warehouse` 语义下通常不是“目录权限不足”，而是下面几类问题之一：
+
+- `ak` 或 `sk` 填错
+- 这把 key 已过期或已撤销
+- 这把 key 在 `warehouse` 里还没有绑定任何目录
+
+注意：
+
+- 在 `warehouse` 里“创建访问密钥”后，默认 `bindingPaths=[]`
+- 只创建 key 不够，必须再把目录绑定到该 key
+
+### 导入或保存凭证时报 `403 Forbidden`
+
+这通常表示：
+
+- `warehouse` 已经识别出这把 key
+- 但当前 `root_path` 不在它已绑定目录范围内，或权限位不够
+
+推荐检查：
+
+- 绑定目录是否覆盖当前 `root_path`
+- 写 key 是否具备 `create/update`
+- 读 key 是否具备 `read`
 
 ## 删除规则
 

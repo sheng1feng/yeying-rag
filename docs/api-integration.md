@@ -26,6 +26,11 @@
 - `POST /auth/verify`
 - `POST /auth/refresh`
 
+说明：
+
+- 当前控制台前端会优先选择夜莺钱包 provider；当浏览器里同时存在夜莺钱包与 MetaMask 时，默认先尝试夜莺钱包
+- 浏览器钱包接入兼容显式注入位和 EIP-6963 provider 广播
+
 ### 2. 服务身份与授权
 
 - `POST /service-principals`
@@ -139,6 +144,7 @@
 - 当前控制台主流程使用手工导入的读凭证 / 写凭证访问 `warehouse`
 - 默认 app 标识为 `knowledge.yeying.pub`，主路径为 `/apps/knowledge.yeying.pub/`
 - 上传、浏览、绑定、导入都只允许发生在该 app 目录内
+- 保存写凭证时，后端会尝试在凭证作用域内完成当前 app 目录或目标根路径的最小 bootstrap
 - 旧 `/warehouse/auth/*` JWT / UCAN 绑定接口已经从当前仓库删除
 - 控制面接口参考 `docs/control-plane-api.md`
 - 读写凭证使用方式参考 `docs/warehouse-credential-usage.md`

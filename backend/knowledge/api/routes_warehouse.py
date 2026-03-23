@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,9 @@ from knowledge.schemas.warehouse import (
     SourceBindingUpdateRequest,
     UploadResponse,
     WarehouseBrowseResponse,
+    WarehouseBootstrapChallengeResponse,
+    WarehouseBootstrapInitializeRequest,
+    WarehouseBootstrapInitializeResponse,
     WarehouseCredentialCreateRequest,
     WarehouseCredentialRevealResponse,
     WarehouseCredentialSummary,
@@ -28,12 +33,15 @@ from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
 from knowledge.services.warehouse import build_warehouse_gateway
 from knowledge.services.warehouse_access import WarehouseAccessService
+from knowledge.services.warehouse_bootstrap import WarehouseBootstrapError, WarehouseBootstrapService
 from knowledge.services.warehouse_scope import ensure_current_app_path, warehouse_app_id, warehouse_app_root, warehouse_default_upload_dir
 
 
 router = APIRouter(tags=["warehouse_sources"])
+logger = logging.getLogger(__name__)
 gateway = build_warehouse_gateway()
 warehouse_access_service = WarehouseAccessService(warehouse_gateway=gateway)
+warehouse_bootstrap_service = WarehouseBootstrapService(warehouse_gateway=gateway)
 parser = DocumentParser()
 binding_service = BindingService()
 settings = get_settings()
@@ -58,7 +66,26 @@ def _raise_access_error(db: Session, resolved, exc: Exception) -> None:
     if resolved is not None and warehouse_access_service.is_auth_error(exc):
         warehouse_access_service.mark_access_invalid(resolved)
         db.commit()
-    raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.exception("warehouse access error", extra={"credential_id": getattr(getattr(resolved, "credential", None), "id", None)})
+    raise HTTPException(status_code=400, detail=_warehouse_error_detail(exc)) from exc
+
+
+def _warehouse_error_detail(exc: Exception, path: str | None = None) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        target = path or str(exc.request.url)
+        if status == 401:
+            return (
+                f"warehouse rejected the access key for {target}. "
+                "This usually means the ak/sk is wrong, the key is revoked or expired, or the access key has no bound directories. "
+                "In warehouse, creating an access key is not enough; you must also bind at least one directory before the key can be used."
+            )
+        if status == 403:
+            return (
+                f"warehouse authenticated the access key but denied access to {target}. "
+                "Bind this directory or choose a root_path under an already bound directory, and ensure the key has the required permissions."
+            )
+    return str(exc)
 
 
 def _current_app_binding_status(db: Session, wallet_address: str) -> WarehouseStatusResponse:
@@ -79,6 +106,21 @@ def _current_app_binding_status(db: Session, wallet_address: str) -> WarehouseSt
     )
 
 
+def _warehouse_bootstrap_error_detail(exc: Exception) -> str:
+    if isinstance(exc, WarehouseBootstrapError):
+        if exc.status == 401:
+            return (
+                "warehouse 未接受当前钱包签名。请确认浏览器里签名的是当前 knowledge 登录钱包，"
+                "并且 warehouse 侧允许该钱包地址完成登录。"
+            )
+        if exc.status == 403:
+            return "warehouse 已识别当前钱包，但拒绝执行该初始化操作。请检查该账号在 warehouse 的目录写入权限。"
+        if exc.status == 404:
+            return "warehouse 未找到对应登录入口或钱包账号。请确认 warehouse 公网地址配置正确。"
+        return str(exc)
+    return str(exc)
+
+
 def _write_credential_response(db: Session, wallet_address: str) -> WarehouseWriteCredentialResponse:
     credential = warehouse_access_service.get_write_credential(db, wallet_address)
     if credential is None:
@@ -92,6 +134,41 @@ def _write_credential_response(db: Session, wallet_address: str) -> WarehouseWri
 @router.get("/warehouse/status", response_model=WarehouseStatusResponse)
 def warehouse_status(wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> WarehouseStatusResponse:
     return _current_app_binding_status(db, wallet_address)
+
+
+@router.post("/warehouse/bootstrap/challenge", response_model=WarehouseBootstrapChallengeResponse)
+def warehouse_bootstrap_challenge(wallet_address: str = Depends(get_current_wallet)) -> WarehouseBootstrapChallengeResponse:
+    try:
+        payload = warehouse_bootstrap_service.request_challenge(wallet_address)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("failed to request warehouse bootstrap challenge", extra={"wallet_address": wallet_address})
+        raise HTTPException(status_code=400, detail=_warehouse_bootstrap_error_detail(exc)) from exc
+    return WarehouseBootstrapChallengeResponse.model_validate(payload)
+
+
+@router.post("/warehouse/bootstrap/initialize", response_model=WarehouseBootstrapInitializeResponse)
+def warehouse_bootstrap_initialize(
+    payload: WarehouseBootstrapInitializeRequest,
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> WarehouseBootstrapInitializeResponse:
+    try:
+        result = warehouse_bootstrap_service.initialize_credentials(
+            db,
+            wallet_address=wallet_address,
+            signature=payload.signature,
+            mode=payload.mode,
+            warehouse_access_service=warehouse_access_service,
+        )
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.exception(
+            "failed to initialize warehouse bootstrap credentials",
+            extra={"wallet_address": wallet_address, "mode": payload.mode},
+        )
+        raise HTTPException(status_code=400, detail=_warehouse_bootstrap_error_detail(exc)) from exc
+    return WarehouseBootstrapInitializeResponse.model_validate(result)
 
 
 @router.get("/warehouse/credentials/read", response_model=list[WarehouseCredentialSummary])
@@ -117,7 +194,11 @@ def create_read_credential(
             root_path=payload.root_path,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception(
+            "failed to create read warehouse credential",
+            extra={"wallet_address": wallet_address, "root_path": payload.root_path, "key_id": payload.key_id},
+        )
+        raise HTTPException(status_code=400, detail=_warehouse_error_detail(exc, payload.root_path)) from exc
     return WarehouseCredentialSummary.model_validate(warehouse_access_service.summarize(credential))
 
 
@@ -172,7 +253,11 @@ def upsert_write_credential(
             root_path=payload.root_path,
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.exception(
+            "failed to upsert write warehouse credential",
+            extra={"wallet_address": wallet_address, "root_path": payload.root_path, "key_id": payload.key_id},
+        )
+        raise HTTPException(status_code=400, detail=_warehouse_error_detail(exc, payload.root_path)) from exc
     return WarehouseCredentialSummary.model_validate(warehouse_access_service.summarize(credential))
 
 
@@ -249,7 +334,12 @@ async def upload_to_app_dir(
         raise HTTPException(status_code=400, detail="file is empty")
     try:
         resolved = warehouse_access_service.resolve_write_access(db, wallet_address, normalized_target_dir)
-        gateway.ensure_app_space(wallet_address, auth=resolved.auth)
+        gateway.ensure_app_space(
+            wallet_address,
+            auth=resolved.auth,
+            base_path=resolved.credential.root_path,
+            target_path=normalized_target_dir,
+        )
         warehouse_path = gateway.upload_file(wallet_address, normalized_target_dir, file.filename, content, auth=resolved.auth)
         warehouse_access_service.mark_access_success(resolved)
     except Exception as exc:  # noqa: BLE001
@@ -371,9 +461,11 @@ def create_binding(
         exists, entry_type = warehouse_access_service.path_exists_with_auth(wallet_address, normalized_source_path, resolved.auth)
         if not exists:
             raise ValueError(f"warehouse path not accessible: {normalized_source_path}")
-        if payload.scope_type == "file" and entry_type != "file":
+        requested_scope_type = str(payload.scope_type or "auto").strip().lower() or "auto"
+        scope_type = entry_type if requested_scope_type == "auto" else requested_scope_type
+        if scope_type == "file" and entry_type != "file":
             raise ValueError(f"source_path is not a file: {normalized_source_path}")
-        if payload.scope_type == "directory" and entry_type != "directory":
+        if scope_type == "directory" and entry_type != "directory":
             raise ValueError(f"source_path is not a directory: {normalized_source_path}")
         warehouse_access_service.mark_access_success(resolved)
     except Exception as exc:  # noqa: BLE001
@@ -388,12 +480,12 @@ def create_binding(
         existing = SourceBinding(
             kb_id=kb_id,
             source_path=normalized_source_path,
-            scope_type=payload.scope_type,
+            scope_type=scope_type,
             credential_id=credential_id,
         )
         db.add(existing)
     else:
-        existing.scope_type = payload.scope_type
+        existing.scope_type = scope_type
         existing.credential_id = credential_id
     db.commit()
     return SourceBindingResponse.model_validate(_binding_summary_or_404(db, kb, existing.id))

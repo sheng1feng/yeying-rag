@@ -8,10 +8,12 @@ from pathlib import Path
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
+import httpx
 
 from tests.helpers import configure_warehouse_credentials
 
 from knowledge.core.settings import get_settings
+from knowledge.api import routes_sources
 from knowledge.main import app
 from knowledge.services.warehouse_scope import warehouse_app_path, warehouse_app_root
 
@@ -254,3 +256,34 @@ def test_source_scan_marks_source_missing_when_root_path_is_removed():
         )
         assert missing_assets.status_code == 200
         assert len(missing_assets.json()) == 1
+
+
+def test_source_scan_returns_400_and_marks_credential_invalid_on_auth_error(monkeypatch):
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        credential_ids = configure_warehouse_credentials(client, headers)
+        kb_id = client.post("/kbs", headers=headers, json={"name": "Auth Error KB", "description": "auth"}).json()["id"]
+
+        source = client.post(
+            f"/kbs/{kb_id}/sources",
+            headers=headers,
+            json={"source_type": "warehouse", "source_path": _app_path("library/auth-error"), "scope_type": "directory"},
+        ).json()
+
+        def deny_browse(*args, **kwargs):
+            request = httpx.Request("PROPFIND", "https://webdav.yeying.pub/dav/apps/knowledge.yeying.pub/library/auth-error")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+
+        monkeypatch.setattr(routes_sources.source_sync_service.asset_inventory_service.warehouse_gateway, "browse", deny_browse)
+
+        scanned = client.post(f"/kbs/{kb_id}/sources/{source['id']}/scan", headers=headers)
+        assert scanned.status_code == 400
+        assert "401 Unauthorized" in scanned.json()["detail"]
+
+        write_credential = client.get("/warehouse/credentials/write", headers=headers)
+        assert write_credential.status_code == 200
+        assert write_credential.json()["credential"]["id"] == credential_ids["write_credential_id"]
+        assert write_credential.json()["credential"]["status"] == "invalid"

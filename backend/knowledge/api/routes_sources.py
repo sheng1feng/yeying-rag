@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+import httpx
 from sqlalchemy.orm import Session
 
 from knowledge.api.deps import get_current_wallet
@@ -102,6 +103,10 @@ def scan_source(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SourceScopeMismatchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return SourceScanResponse(
         source=SourceRead.model_validate(source),

@@ -2,6 +2,11 @@ const APP_CONFIG = window.__KNOWLEDGE_CONFIG__ || {};
 const DEFAULT_WAREHOUSE_APP_ID = APP_CONFIG.warehouse_app_id || "knowledge.yeying.pub";
 const DEFAULT_WAREHOUSE_APP_ROOT = APP_CONFIG.warehouse_app_root || `/apps/${DEFAULT_WAREHOUSE_APP_ID}`;
 const DEFAULT_WAREHOUSE_UPLOAD_DIR = APP_CONFIG.warehouse_upload_dir || `${DEFAULT_WAREHOUSE_APP_ROOT}/uploads`;
+const DEFAULT_WAREHOUSE_BASE_URL = APP_CONFIG.warehouse_base_url || "";
+const DEFAULT_WAREHOUSE_WEBDAV_PREFIX = APP_CONFIG.warehouse_webdav_prefix || "/dav";
+const WAREHOUSE_TEMP_TOKEN_KEY = "knowledge:warehouse_temp_token";
+const WAREHOUSE_TEMP_WALLET_KEY = "knowledge:warehouse_temp_wallet";
+const WAREHOUSE_TEMP_STAGE_KEY = "knowledge:warehouse_temp_stage";
 
 const state = {
   token: localStorage.getItem("knowledge_token") || "",
@@ -18,7 +23,18 @@ const state = {
   warehouseAppId: DEFAULT_WAREHOUSE_APP_ID,
   warehouseAppRoot: DEFAULT_WAREHOUSE_APP_ROOT,
   warehouseUploadDir: DEFAULT_WAREHOUSE_UPLOAD_DIR,
+  warehouseBaseUrl: DEFAULT_WAREHOUSE_BASE_URL,
+  warehouseWebdavPrefix: DEFAULT_WAREHOUSE_WEBDAV_PREFIX,
   currentBrowsePath: DEFAULT_WAREHOUSE_APP_ROOT,
+  warehouseTempToken: "",
+  warehouseTempWallet: "",
+  warehouseTempStage: "",
+  warehouseBootstrapMode: "",
+  warehouseBootstrapMessage: "",
+  warehouseBootstrapError: "",
+  warehouseBootstrapWriteKeyId: "",
+  warehouseBootstrapReadKeyId: "",
+  warehouseBootstrapTargetPath: "",
   readCredentials: [],
   writeCredential: null,
   browseAccessSource: "",
@@ -53,6 +69,76 @@ const TASK_POLL_INTERVAL_MS = 3000;
 function el(id) {
   return document.getElementById(id);
 }
+
+function bindEvent(id, eventName, handler) {
+  const node = el(id);
+  if (!node) return null;
+  node.addEventListener(eventName, handler);
+  return node;
+}
+
+function readSessionValue(key) {
+  try {
+    return sessionStorage.getItem(key) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSessionValue(key, value) {
+  try {
+    if (value) {
+      sessionStorage.setItem(key, value);
+    } else {
+      sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore session storage failures.
+  }
+}
+
+function walletHelper() {
+  return window.KnowledgeWallet || null;
+}
+
+function warehouseBridgeHelper() {
+  return window.KnowledgeWarehouseBridge || null;
+}
+
+function detectedWalletName() {
+  const helper = walletHelper();
+  if (!helper?.hasWallet?.()) return "";
+  return String(helper.getWalletName?.() || "").trim();
+}
+
+async function refreshWalletEnvironment() {
+  const helper = walletHelper();
+  if (!helper?.discoverProvider) {
+    renderWalletSummary();
+    return;
+  }
+  try {
+    await helper.discoverProvider({ timeoutMs: 1200 });
+  } catch {
+    // Ignore wallet discovery errors during passive refresh.
+  }
+  renderWalletSummary();
+}
+
+function syncWarehouseTempSessionState() {
+  state.warehouseTempToken = readSessionValue(WAREHOUSE_TEMP_TOKEN_KEY);
+  state.warehouseTempWallet = readSessionValue(WAREHOUSE_TEMP_WALLET_KEY);
+  state.warehouseTempStage = readSessionValue(WAREHOUSE_TEMP_STAGE_KEY);
+}
+
+function persistWarehouseTempSession({ token = "", wallet = "", stage = "" } = {}) {
+  writeSessionValue(WAREHOUSE_TEMP_TOKEN_KEY, token);
+  writeSessionValue(WAREHOUSE_TEMP_WALLET_KEY, wallet);
+  writeSessionValue(WAREHOUSE_TEMP_STAGE_KEY, stage);
+  syncWarehouseTempSessionState();
+}
+
+syncWarehouseTempSessionState();
 
 function setText(id, value) {
   const node = el(id);
@@ -128,10 +214,34 @@ function isBrowseUsingWriteCredential() {
   return currentBrowseAccessSource() === "write";
 }
 
+function bindingCredentialId() {
+  return Number(el("binding-credential-id")?.value || 0) || null;
+}
+
+function bindingCredential() {
+  const id = bindingCredentialId();
+  if (!id) return null;
+  return state.readCredentials.find((credential) => Number(credential.id) === id) || null;
+}
+
+function bindingScopeType() {
+  return String(el("binding-scope-type")?.value || "auto").trim().toLowerCase() || "auto";
+}
+
+function setBrowseAccessSource(source) {
+  state.browseAccessSource = String(source || "");
+  const browseSelect = el("warehouse-access-source");
+  if (browseSelect) {
+    browseSelect.value = state.browseAccessSource;
+  }
+}
+
 function syncWarehouseConfig(data = {}) {
   state.warehouseAppId = data.current_app_id || state.warehouseAppId || DEFAULT_WAREHOUSE_APP_ID;
   state.warehouseAppRoot = data.current_app_root || state.warehouseAppRoot || DEFAULT_WAREHOUSE_APP_ROOT;
   state.warehouseUploadDir = data.current_app_upload_dir || state.warehouseUploadDir || DEFAULT_WAREHOUSE_UPLOAD_DIR;
+  state.warehouseBaseUrl = data.warehouse_base_url || state.warehouseBaseUrl || DEFAULT_WAREHOUSE_BASE_URL;
+  state.warehouseWebdavPrefix = data.warehouse_webdav_prefix || state.warehouseWebdavPrefix || DEFAULT_WAREHOUSE_WEBDAV_PREFIX;
   if (!state.currentBrowsePath || state.currentBrowsePath === "/" || state.currentBrowsePath.startsWith("/personal")) {
     state.currentBrowsePath = state.warehouseAppRoot;
   }
@@ -201,8 +311,15 @@ function updateWarehouseCredentialSelectors() {
 
 function renderWalletSummary() {
   const wallet = String(state.wallet || "");
-  const status = !wallet ? "未登录" : state.warehouseReady ? "已登录 · 凭证已就绪" : "已登录 · 等待导入仓库凭证";
-  const walletLabel = wallet ? shortenMiddle(wallet) : "未连接钱包";
+  const providerName = detectedWalletName();
+  const status = !wallet
+    ? providerName
+      ? `未登录 · 已检测到${providerName}`
+      : "未登录 · 未检测到钱包"
+    : state.warehouseReady
+      ? "已登录 · 凭证已就绪"
+      : "已登录 · 等待导入仓库凭证";
+  const walletLabel = wallet ? shortenMiddle(wallet) : providerName ? `${providerName} 已就绪` : "未连接钱包";
   setText("login-status", status);
   setText("pill-wallet", wallet ? `钱包：${shortenMiddle(wallet, 6, 4)}` : "钱包：未登录");
   const walletAddress = el("wallet-address");
@@ -458,6 +575,11 @@ function setOutput(data) {
   el("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
 }
 
+function setLoginProgress(message, extra = {}) {
+  const payload = Object.keys(extra).length ? { stage: message, ...extra } : { stage: message };
+  setOutput(payload);
+}
+
 function notify(type, message) {
   const container = el("toast-container");
   const toast = document.createElement("div");
@@ -508,6 +630,154 @@ function withFeedback(fn, successMessage = "") {
       throw error;
     }
   };
+}
+
+function setWarehouseBootstrapState(stage, message = "", extra = {}) {
+  state.warehouseTempStage = stage || "";
+  state.warehouseBootstrapMessage = message || "";
+  state.warehouseBootstrapError = extra.error || "";
+  if (extra.mode !== undefined) state.warehouseBootstrapMode = extra.mode || "";
+  if (extra.targetPath !== undefined) state.warehouseBootstrapTargetPath = extra.targetPath || "";
+  if (extra.writeKeyId !== undefined) state.warehouseBootstrapWriteKeyId = extra.writeKeyId || "";
+  if (extra.readKeyId !== undefined) state.warehouseBootstrapReadKeyId = extra.readKeyId || "";
+  if (extra.wallet !== undefined) state.warehouseTempWallet = extra.wallet || "";
+  writeSessionValue(WAREHOUSE_TEMP_WALLET_KEY, state.warehouseTempWallet);
+  writeSessionValue(WAREHOUSE_TEMP_STAGE_KEY, state.warehouseTempStage);
+  renderWarehouseBootstrapStatus();
+  setOutput({
+    warehouse_stage: state.warehouseTempStage || "-",
+    warehouse_mode: state.warehouseBootstrapMode || "-",
+    warehouse_target_path: state.warehouseBootstrapTargetPath || "-",
+    message: state.warehouseBootstrapError || state.warehouseBootstrapMessage || message || "",
+    warehouse_base_url: state.warehouseBaseUrl || "-",
+    ...("wallet" in extra ? { warehouse_wallet: extra.wallet } : {}),
+    ...("writeKeyId" in extra ? { warehouse_write_key_id: extra.writeKeyId || "" } : {}),
+    ...("readKeyId" in extra ? { warehouse_read_key_id: extra.readKeyId || "" } : {}),
+  });
+}
+
+function clearWarehouseTempSession() {
+  persistWarehouseTempSession({ token: "", wallet: "", stage: "" });
+  state.warehouseBootstrapMode = "";
+  state.warehouseBootstrapMessage = "";
+  state.warehouseBootstrapError = "";
+  state.warehouseBootstrapWriteKeyId = "";
+  state.warehouseBootstrapReadKeyId = "";
+  state.warehouseBootstrapTargetPath = "";
+  renderWarehouseBootstrapStatus();
+  setOutput({ ok: true, message: "warehouse 临时会话已清理" });
+}
+
+function bootstrapTargetPathForMode(mode) {
+  return mode === "app_root_write" ? currentWarehouseAppRoot() : currentWarehouseUploadDir();
+}
+
+function bootstrapLabels(mode) {
+  if (mode === "app_root_write") {
+    return {
+      modeLabel: "app 根写凭证",
+      writeName: `knowledge-app-root-write-${Date.now().toString(36)}`,
+      writePermissions: ["read", "create", "update"],
+      createReadCredential: false,
+      targetPath: currentWarehouseAppRoot(),
+      mkcolPath: currentWarehouseAppRoot(),
+    };
+  }
+  return {
+    modeLabel: "uploads 读写凭证",
+    writeName: `knowledge-uploads-write-${Date.now().toString(36)}`,
+    writePermissions: ["read", "create", "update"],
+    readName: `knowledge-uploads-read-${Date.now().toString(36)}`,
+    readPermissions: ["read"],
+    createReadCredential: true,
+    targetPath: currentWarehouseUploadDir(),
+    mkcolPath: currentWarehouseUploadDir(),
+  };
+}
+
+async function bootstrapWarehouseCredentials(mode = "uploads_bundle") {
+  if (state.writeCredential) {
+    const confirmed = await confirmAction(
+      "覆盖当前写凭证",
+      "该操作会用 warehouse 临时授权生成的新写凭证覆盖当前写凭证配置。已有读凭证不会被删除。",
+    );
+    if (!confirmed) return;
+  }
+  const helper = walletHelper();
+  if (!helper) {
+    throw new Error("钱包适配层未加载");
+  }
+  const labels = bootstrapLabels(mode);
+  const targetPath = labels.targetPath;
+  state.warehouseBootstrapMode = mode;
+  state.warehouseBootstrapTargetPath = targetPath;
+  state.warehouseBootstrapError = "";
+  state.warehouseBootstrapMessage = "";
+  state.warehouseBootstrapWriteKeyId = "";
+  state.warehouseBootstrapReadKeyId = "";
+  renderWarehouseBootstrapStatus();
+
+  try {
+    setWarehouseBootstrapState("requesting_challenge", "正在向 knowledge 后端请求 warehouse challenge", {
+      mode,
+      targetPath,
+    });
+    const challenge = await api("/warehouse/bootstrap/challenge", {
+      method: "POST",
+    });
+    const provider = (await helper.discoverProvider?.({ timeoutMs: 1200 })) || helper.getWalletProvider?.();
+    if (!provider) {
+      throw new Error("未检测到钱包，请先安装或解锁夜莺钱包。");
+    }
+    const providerName = helper.getWalletName?.(provider) || "Web3 钱包";
+    setWarehouseBootstrapState("signing_challenge", "正在请求钱包签名 warehouse challenge", {
+      mode,
+      targetPath,
+      wallet: challenge.wallet_address,
+    });
+    const [wallet] = await helper.requestAccounts(provider, { timeoutMs: 15000 });
+    if (!wallet) {
+      throw new Error("未获取到可用钱包账户。");
+    }
+    const normalizedWallet = String(wallet).trim().toLowerCase();
+    const expectedWallet = String(state.wallet || challenge.wallet_address || "").trim().toLowerCase();
+    if (expectedWallet && normalizedWallet !== expectedWallet) {
+      throw new Error(`当前钱包账户 ${wallet} 与 knowledge 登录地址 ${state.wallet} 不一致。请先切回相同钱包地址。`);
+    }
+    const signature = await helper.signChallenge(provider, wallet, challenge.challenge, { timeoutMs: 20000 });
+
+    setWarehouseBootstrapState("initializing", "knowledge 后端正在代为完成 warehouse 初始化", {
+      mode,
+      targetPath,
+      wallet,
+    });
+    const result = await api("/warehouse/bootstrap/initialize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, signature }),
+    });
+
+    await Promise.all([refreshWarehouseStatus(), refreshWriteCredential(), refreshReadCredentials()]);
+    persistWarehouseTempSession({ token: "", wallet, stage: "ready" });
+    setWarehouseBootstrapState("ready", `${labels.modeLabel} 初始化完成`, {
+      mode: result.mode || mode,
+      targetPath: result.target_path || targetPath,
+      wallet,
+      writeKeyId: result.write_key_id || "",
+      readKeyId: result.read_key_id || "",
+    });
+    notify("success", `${labels.modeLabel} 初始化完成`);
+  } catch (error) {
+    const message = helper.formatWalletActionError?.(error, "warehouse 初始化失败，请稍后重试。") || String(error);
+    setWarehouseBootstrapState("failed", "", {
+      mode,
+      targetPath,
+      error: message,
+      writeKeyId: state.warehouseBootstrapWriteKeyId,
+      readKeyId: state.warehouseBootstrapReadKeyId,
+    });
+    throw new Error(message);
+  }
 }
 
 function setLoggedIn(wallet) {
@@ -907,6 +1177,34 @@ function collectPathPickerSections(fieldId) {
     });
 }
 
+async function ensureBindingBrowseContext() {
+  const credential = bindingCredential();
+  if (!credential) {
+    throw new Error("请先选择读凭证，再选择绑定源路径");
+  }
+  const targetSource = `read:${credential.id}`;
+  const targetRoot = String(credential.root_path || "").trim();
+  if (!targetRoot) {
+    throw new Error("当前读凭证缺少 root_path");
+  }
+  const currentPath = String(state.currentBrowsePath || "").trim();
+  const browsingWrite = isBrowseUsingWriteCredential();
+  const browsingDifferentCredential = currentBrowseCredentialId() !== credential.id;
+  const outOfRoot = !currentPath || (currentPath !== targetRoot && !currentPath.startsWith(`${targetRoot}/`));
+
+  setBrowseAccessSource(targetSource);
+  if (browsingWrite || browsingDifferentCredential || outOfRoot || !state.warehouseEntries.length) {
+    await browseWarehouse(targetRoot, credential.id, false);
+  }
+}
+
+async function openPathPickerForField(fieldId) {
+  if (fieldId === "binding-path") {
+    await ensureBindingBrowseContext();
+  }
+  renderPathPicker(fieldId);
+}
+
 function renderPathPicker(fieldId) {
   const menu = el("path-picker-menu");
   const sectionsEl = el("path-picker-sections");
@@ -922,7 +1220,10 @@ function renderPathPicker(fieldId) {
     state.pathPickerCloseTimer = null;
   }
   if (contextEl) {
-    contextEl.textContent = `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前目录：${state.currentBrowsePath || "/"}`;
+    const credential = fieldId === "binding-path" ? bindingCredential() : null;
+    contextEl.textContent = credential
+      ? `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前使用读凭证 ${credential.key_id}，根目录：${credential.root_path}`
+      : `为“${pathFieldLabel(fieldId)}”选择 warehouse 路径。当前目录：${state.currentBrowsePath || "/"}`;
   }
   if (modeEl) {
     modeEl.innerHTML = `
@@ -1257,29 +1558,58 @@ function renderDocumentDetail(detail = null) {
 }
 
 async function loginWithWallet() {
-  if (!window.ethereum) {
-    throw new Error("未检测到浏览器钱包");
+  const helper = walletHelper();
+  if (!helper) {
+    throw new Error("钱包适配层未加载");
   }
-  const [wallet] = await window.ethereum.request({ method: "eth_requestAccounts" });
-  const challenge = await api("/auth/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: wallet }),
-  });
-  const signature = await window.ethereum.request({
-    method: "personal_sign",
-    params: [challenge.message, wallet],
-  });
-  const token = await api("/auth/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ wallet_address: wallet, signature }),
-  });
-  state.token = token.access_token;
-  localStorage.setItem("knowledge_token", token.access_token);
-  setLoggedIn(token.wallet_address);
-  await refreshAll();
-  setOutput(token);
+  try {
+    setLoginProgress("正在检测钱包环境");
+    const provider = (await helper.discoverProvider?.({ timeoutMs: 1200 })) || helper.getWalletProvider?.();
+    if (!provider) {
+      throw new Error("未检测到钱包，请安装 MetaMask 或夜莺钱包");
+    }
+
+    const providerName = helper.getWalletName?.(provider) || "Web3 钱包";
+    setLoginProgress("正在请求钱包账户", { wallet_provider: providerName });
+    const [wallet] = await helper.requestAccounts(provider, { timeoutMs: 15000 });
+    if (!wallet) {
+      throw new Error("未获取到账户");
+    }
+
+    setLoginProgress("钱包账户已连接，正在获取 challenge", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const challenge = await api("/auth/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet_address: wallet }),
+    });
+
+    setLoginProgress("challenge 已获取，正在请求钱包签名", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const signature = await helper.signChallenge(provider, wallet, challenge.message, { timeoutMs: 20000 });
+
+    setLoginProgress("签名完成，正在校验登录", {
+      wallet_provider: providerName,
+      wallet_address: wallet,
+    });
+    const token = await api("/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet_address: wallet, signature }),
+    });
+    state.token = token.access_token;
+    localStorage.setItem("knowledge_token", token.access_token);
+    setLoggedIn(token.wallet_address);
+    await refreshAll();
+    setOutput(token);
+  } catch (error) {
+    const message = helper.formatWalletLoginError?.(error, "knowledge 登录失败，请稍后重试。") || String(error);
+    throw new Error(message);
+  }
 }
 
 async function logout() {
@@ -1380,6 +1710,42 @@ function renderWriteCredential() {
   `;
 }
 
+function renderWarehouseBootstrapStatus() {
+  const box = el("warehouse-bootstrap-status");
+  if (!box) return;
+  if (!state.warehouseBaseUrl) {
+    box.className = "empty";
+    box.textContent = "当前环境未配置 warehouse_base_url，无法使用临时初始化。";
+    return;
+  }
+  const connected = Boolean(state.warehouseTempWallet);
+  const stage = state.warehouseBootstrapMode
+    ? `${state.warehouseBootstrapMode === "uploads_bundle" ? "uploads 读写凭证" : "app 根写凭证"} · ${state.warehouseTempStage || state.warehouseBootstrapMode}`
+    : state.warehouseTempStage || (connected ? "authorized" : "idle");
+  const tone = state.warehouseBootstrapError ? "danger" : connected ? "success" : "warning";
+  const targetPath = state.warehouseBootstrapTargetPath || (state.warehouseBootstrapMode === "app_root_write" ? currentWarehouseAppRoot() : currentWarehouseUploadDir());
+  const message =
+    state.warehouseBootstrapError ||
+    state.warehouseBootstrapMessage ||
+    (connected ? "最近一次初始化已通过 knowledge 后端代理完成，可继续重试。": "尚未开始 warehouse 初始化。");
+  const details = [
+    `<div class="detail-list-item"><div class="detail-list-head"><strong>warehouse</strong><span class="pill ${tone}">${escapeHtml(stage)}</span></div><div class="helper">${escapeHtml(state.warehouseBaseUrl)}</div></div>`,
+    `<div class="detail-list-item"><div class="detail-list-head"><strong>目标路径</strong><span class="pill">${escapeHtml(targetPath)}</span></div><div class="helper">${escapeHtml(message)}</div></div>`,
+  ];
+  if (connected) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>最近使用钱包</strong><span class="pill success">${escapeHtml(shortenMiddle(state.warehouseTempWallet || "-", 10, 6) || "-")}</span></div><div class="helper">浏览器只负责 challenge 签名；后续 warehouse API、access key 创建、目录创建与凭证回填都由 knowledge 后端代理执行。</div></div>`,
+    );
+  }
+  if (state.warehouseBootstrapWriteKeyId || state.warehouseBootstrapReadKeyId) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>最近生成的密钥</strong><span class="pill">${escapeHtml(state.warehouseBootstrapReadKeyId ? "读写已回填" : "写已回填")}</span></div><div class="helper">write=${escapeHtml(state.warehouseBootstrapWriteKeyId || "-")} · read=${escapeHtml(state.warehouseBootstrapReadKeyId || "-")}</div></div>`,
+    );
+  }
+  box.className = "detail-list";
+  box.innerHTML = details.join("");
+}
+
 async function saveReadCredential() {
   const keyId = (el("read-credential-key-id").value || "").trim();
   const keySecret = (el("read-credential-key-secret").value || "").trim();
@@ -1453,71 +1819,77 @@ async function revealWriteCredential() {
 
 function renderOps() {
   const overview = el("ops-overview");
-  if (!state.opsOverview) {
-    overview.className = "empty";
-    overview.textContent = "尚未加载运维状态。";
-  } else {
-    overview.className = "grid-3";
-    overview.innerHTML = `
-      <div class="list-item"><div class="list-title">知识库</div><div class="metric-value">${formatNumber(state.opsOverview.knowledge_bases)}</div></div>
-      <div class="list-item"><div class="list-title">文档</div><div class="metric-value">${formatNumber(state.opsOverview.documents)}</div></div>
-      <div class="list-item"><div class="list-title">Chunk</div><div class="metric-value">${formatNumber(state.opsOverview.chunks)}</div></div>
-      <div class="list-item"><div class="list-title">待执行任务</div><div class="metric-value">${formatNumber(state.opsOverview.tasks_pending)}</div></div>
-      <div class="list-item"><div class="list-title">长期记忆</div><div class="metric-value">${formatNumber(state.opsOverview.long_term_memories)}</div></div>
-      <div class="list-item"><div class="list-title">记忆事件</div><div class="metric-value">${formatNumber(state.opsOverview.memory_ingestions)}</div></div>
-    `;
+  if (overview) {
+    if (!state.opsOverview) {
+      overview.className = "empty";
+      overview.textContent = "尚未加载运维状态。";
+    } else {
+      overview.className = "grid-3";
+      overview.innerHTML = `
+        <div class="list-item"><div class="list-title">知识库</div><div class="metric-value">${formatNumber(state.opsOverview.knowledge_bases)}</div></div>
+        <div class="list-item"><div class="list-title">文档</div><div class="metric-value">${formatNumber(state.opsOverview.documents)}</div></div>
+        <div class="list-item"><div class="list-title">Chunk</div><div class="metric-value">${formatNumber(state.opsOverview.chunks)}</div></div>
+        <div class="list-item"><div class="list-title">待执行任务</div><div class="metric-value">${formatNumber(state.opsOverview.tasks_pending)}</div></div>
+        <div class="list-item"><div class="list-title">长期记忆</div><div class="metric-value">${formatNumber(state.opsOverview.long_term_memories)}</div></div>
+        <div class="list-item"><div class="list-title">记忆事件</div><div class="metric-value">${formatNumber(state.opsOverview.memory_ingestions)}</div></div>
+      `;
+    }
   }
 
   const stores = el("ops-stores");
-  if (!state.opsStores) {
-    stores.className = "empty";
-    stores.textContent = "尚未加载健康状态。";
-  } else {
-    const vectorStatus =
-      typeof state.opsStores.vector_store_status === "object"
-        ? JSON.stringify(state.opsStores.vector_store_status)
-        : String(state.opsStores.vector_store_status || "-");
-    stores.className = "detail-list";
-    stores.innerHTML = `
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>数据库</strong><span class="pill ${state.opsStores.database === "ok" ? "success" : "danger"}">${escapeHtml(state.opsStores.database)}</span></div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>向量检索</strong><span class="pill ${String(vectorStatus).includes("error") ? "danger" : "success"}">${escapeHtml(state.opsStores.vector_store_mode)}</span></div>
-        <div class="helper">${escapeHtml(vectorStatus)}</div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>模型网关</strong><span class="pill ${String(state.opsStores.model_provider_status).includes("configured") ? "success" : "warning"}">${escapeHtml(state.opsStores.model_provider_mode)}</span></div>
-        <div class="helper">${escapeHtml(state.opsStores.model_provider_status || "-")}</div>
-      </div>
-      <div class="detail-list-item">
-        <div class="detail-list-head"><strong>资产仓库</strong><span class="pill">${escapeHtml(state.opsStores.warehouse_gateway_mode || "-")}</span></div>
-        <div class="helper">${escapeHtml(state.opsStores.warehouse_base_url || "-")}</div>
-      </div>
-    `;
+  if (stores) {
+    if (!state.opsStores) {
+      stores.className = "empty";
+      stores.textContent = "尚未加载健康状态。";
+    } else {
+      const vectorStatus =
+        typeof state.opsStores.vector_store_status === "object"
+          ? JSON.stringify(state.opsStores.vector_store_status)
+          : String(state.opsStores.vector_store_status || "-");
+      stores.className = "detail-list";
+      stores.innerHTML = `
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>数据库</strong><span class="pill ${state.opsStores.database === "ok" ? "success" : "danger"}">${escapeHtml(state.opsStores.database)}</span></div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>向量检索</strong><span class="pill ${String(vectorStatus).includes("error") ? "danger" : "success"}">${escapeHtml(state.opsStores.vector_store_mode)}</span></div>
+          <div class="helper">${escapeHtml(vectorStatus)}</div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>模型网关</strong><span class="pill ${String(state.opsStores.model_provider_status).includes("configured") ? "success" : "warning"}">${escapeHtml(state.opsStores.model_provider_mode)}</span></div>
+          <div class="helper">${escapeHtml(state.opsStores.model_provider_status || "-")}</div>
+        </div>
+        <div class="detail-list-item">
+          <div class="detail-list-head"><strong>资产仓库</strong><span class="pill">${escapeHtml(state.opsStores.warehouse_gateway_mode || "-")}</span></div>
+          <div class="helper">${escapeHtml(state.opsStores.warehouse_base_url || "-")}</div>
+        </div>
+      `;
+    }
   }
 
   const workers = el("ops-workers");
-  if (!state.opsWorkers.length) {
-    workers.innerHTML = `<div class="empty">还没有 worker 心跳，先处理一次任务或启动 worker。</div>`;
-  } else {
-    workers.innerHTML = state.opsWorkers
-      .map(
-        (worker) => `
-          <div class="list-item">
-            <div class="list-head">
-              <div class="list-title">${escapeHtml(worker.worker_name)}</div>
-              <span class="pill ${worker.status === "idle" || worker.status === "running" ? "success" : worker.status === "stale" ? "warning" : "danger"}">${escapeHtml(worker.status)}</span>
+  if (workers) {
+    if (!state.opsWorkers.length) {
+      workers.innerHTML = `<div class="empty">还没有 worker 心跳，先处理一次任务或启动 worker。</div>`;
+    } else {
+      workers.innerHTML = state.opsWorkers
+        .map(
+          (worker) => `
+            <div class="list-item">
+              <div class="list-head">
+                <div class="list-title">${escapeHtml(worker.worker_name)}</div>
+                <span class="pill ${worker.status === "idle" || worker.status === "running" ? "success" : worker.status === "stale" ? "warning" : "danger"}">${escapeHtml(worker.status)}</span>
+              </div>
+              <div class="list-meta muted">
+                <span>last seen: ${formatDate(worker.last_seen_at)}</span>
+                <span>last processed: ${formatDate(worker.last_processed_at)}</span>
+              </div>
+              <div class="helper">processed_count=${formatNumber(worker.processed_count)} ${worker.last_error ? `· last_error=${worker.last_error}` : ""}</div>
             </div>
-            <div class="list-meta muted">
-              <span>last seen: ${formatDate(worker.last_seen_at)}</span>
-              <span>last processed: ${formatDate(worker.last_processed_at)}</span>
-            </div>
-            <div class="helper">processed_count=${formatNumber(worker.processed_count)} ${worker.last_error ? `· last_error=${worker.last_error}` : ""}</div>
-          </div>
-        `,
-      )
-      .join("");
+          `,
+        )
+        .join("");
+    }
   }
 
   const failures = el("ops-failures");
@@ -1783,10 +2155,11 @@ async function previewWarehouseFile(path, credentialId = currentBrowseCredential
   setOutput(result);
 }
 
-async function addBinding(path = null, scopeType = "file") {
+async function addBinding(path = null, scopeType = "auto") {
   const kbId = currentKBOrThrow();
   const sourcePath = (path || el("binding-path").value || "").trim();
   const credentialId = Number(el("binding-credential-id").value || 0);
+  const selectedScopeType = String(scopeType || bindingScopeType() || "auto").trim().toLowerCase() || "auto";
   if (!sourcePath) {
     throw new Error("绑定路径不能为空");
   }
@@ -1796,9 +2169,12 @@ async function addBinding(path = null, scopeType = "file") {
   const result = await api(`/kbs/${kbId}/bindings`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_path: sourcePath, scope_type: scopeType, credential_id: credentialId }),
+    body: JSON.stringify({ source_path: sourcePath, scope_type: selectedScopeType, credential_id: credentialId }),
   });
   el("binding-path").value = sourcePath;
+  if (el("binding-scope-type")) {
+    el("binding-scope-type").value = selectedScopeType;
+  }
   setOutput(result);
   await refreshBindings();
   await refreshCurrentKBStats();
@@ -2557,6 +2933,7 @@ function renderAll() {
   updateWarehouseCredentialSelectors();
   renderReadCredentials();
   renderWriteCredential();
+  renderWarehouseBootstrapStatus();
   renderBindings();
   renderKBWorkbench();
   renderWarehouseEntries();
@@ -2579,138 +2956,170 @@ function attachStaticEvents() {
     item.addEventListener("click", () => setView(item.dataset.viewTarget));
   });
 
-  el("jump-dashboard").addEventListener("click", () => setView("dashboard"));
-  el("jump-warehouse").addEventListener("click", () => setView("warehouse"));
-  if (el("jump-search-lab")) {
-    el("jump-search-lab").addEventListener("click", () => setView("search-lab"));
-  }
-  el("refresh-ops").addEventListener("click", () => withFeedback(refreshOps, "运维状态已刷新")().catch(() => {}));
+  bindEvent("jump-dashboard", "click", () => setView("dashboard"));
+  bindEvent("jump-warehouse", "click", () => setView("warehouse"));
+  bindEvent("jump-search-lab", "click", () => setView("search-lab"));
+  bindEvent("refresh-ops", "click", () => withFeedback(refreshOps, "运维状态已刷新")().catch(() => {}));
 
-  el("connect-wallet").addEventListener("click", () => withFeedback(loginWithWallet, "knowledge 登录成功")().catch(() => {}));
-  el("logout-button").addEventListener("click", () => withFeedback(logout, "已退出 knowledge")().catch(() => {}));
-  el("dashboard-refresh-all").addEventListener("click", () => withFeedback(refreshAll, "已刷新全部数据")().catch(() => {}));
+  bindEvent("connect-wallet", "click", () => withFeedback(loginWithWallet, "knowledge 登录成功")().catch(() => {}));
+  bindEvent("logout-button", "click", () => withFeedback(logout, "已退出 knowledge")().catch(() => {}));
+  bindEvent("dashboard-refresh-all", "click", () => withFeedback(refreshAll, "已刷新全部数据")().catch(() => {}));
 
-  el("refresh-kbs").addEventListener("click", () => withFeedback(refreshKBs, "知识库列表已刷新")().catch(() => {}));
-  el("open-create-kb").addEventListener("click", () => {
+  bindEvent("refresh-kbs", "click", () => withFeedback(refreshKBs, "知识库列表已刷新")().catch(() => {}));
+  bindEvent("open-create-kb", "click", () => {
     try {
       openKBEditor("create");
     } catch (err) {
       notify("error", err.message);
     }
   });
-  el("open-edit-kb").addEventListener("click", () => {
+  bindEvent("open-edit-kb", "click", () => {
     try {
       openKBEditor("edit");
     } catch (err) {
       notify("error", err.message);
     }
   });
-  el("create-kb").addEventListener("click", () => withFeedback(createKB, "知识库创建成功")().catch(() => {}));
-  el("update-kb").addEventListener("click", () => withFeedback(updateKB, "知识库配置已更新")().catch(() => {}));
-  el("delete-kb").addEventListener("click", () => withFeedback(() => deleteKB(), "知识库已删除")().catch(() => {}));
-  el("refresh-bindings").addEventListener("click", () => withFeedback(refreshBindings, "绑定源已刷新")().catch(() => {}));
-  el("add-binding").addEventListener("click", () => withFeedback(() => addBinding(), "绑定源已添加")().catch(() => {}));
-  el("save-read-credential").addEventListener("click", () =>
+  bindEvent("create-kb", "click", () => withFeedback(createKB, "知识库创建成功")().catch(() => {}));
+  bindEvent("update-kb", "click", () => withFeedback(updateKB, "知识库配置已更新")().catch(() => {}));
+  bindEvent("delete-kb", "click", () => withFeedback(() => deleteKB(), "知识库已删除")().catch(() => {}));
+  bindEvent("refresh-bindings", "click", () => withFeedback(refreshBindings, "绑定源已刷新")().catch(() => {}));
+  bindEvent("binding-credential-id", "change", () => {
+    const credential = bindingCredential();
+    if (!credential) return;
+    setBrowseAccessSource(`read:${credential.id}`);
+  });
+  bindEvent("use-current-browse-for-binding", "click", () => {
+    withFeedback(async () => {
+      await ensureBindingBrowseContext();
+      const path = state.currentBrowsePath || bindingCredential()?.root_path || currentWarehouseUploadDir();
+      el("binding-path").value = path;
+      if (el("binding-scope-type")) {
+        el("binding-scope-type").value = "directory";
+      }
+    }, "已填入当前浏览路径")().catch(() => {});
+  });
+  bindEvent("add-binding", "click", () => withFeedback(() => addBinding(), "绑定源已添加")().catch(() => {}));
+  bindEvent("save-read-credential", "click", () =>
     withFeedback(saveReadCredential, "读凭证已导入")().catch(() => {}),
   );
 
-  el("browse-warehouse").addEventListener("click", () => withFeedback(() => browseWarehouse(), "仓库目录已刷新")().catch(() => {}));
-  el("browse-app-root").addEventListener("click", () => withFeedback(() => browseWarehouse(currentWarehouseAppRoot()))().catch(() => {}));
-  el("browse-upload-root").addEventListener("click", () => withFeedback(() => browseWarehouse(currentWarehouseUploadDir()))().catch(() => {}));
-  el("warehouse-access-source").addEventListener("change", (event) => {
+  bindEvent("browse-warehouse", "click", () => withFeedback(() => browseWarehouse(), "仓库目录已刷新")().catch(() => {}));
+  bindEvent("browse-app-root", "click", () => withFeedback(() => browseWarehouse(currentWarehouseAppRoot()))().catch(() => {}));
+  bindEvent("browse-upload-root", "click", () => withFeedback(() => browseWarehouse(currentWarehouseUploadDir()))().catch(() => {}));
+  bindEvent("warehouse-access-source", "change", (event) => {
     state.browseAccessSource = event.target.value || "";
   });
-  el("clear-warehouse-filter").addEventListener("click", () => {
+  bindEvent("clear-warehouse-filter", "click", () => {
     el("warehouse-filter").value = "";
     renderWarehouseEntries();
   });
-  el("warehouse-filter").addEventListener("input", () => renderWarehouseEntries());
-  el("path-picker-close").addEventListener("click", () => closePathPicker());
-  el("path-picker-filter").addEventListener("input", () => {
+  bindEvent("warehouse-filter", "input", () => renderWarehouseEntries());
+  bindEvent("path-picker-close", "click", () => closePathPicker());
+  bindEvent("path-picker-filter", "input", () => {
     if (state.pathPickerFieldId) {
       renderPathPicker(state.pathPickerFieldId);
     }
   });
   document.querySelectorAll("[data-path-field]").forEach((node) => {
-    node.addEventListener("focus", () => renderPathPicker(node.id));
-    node.addEventListener("click", () => renderPathPicker(node.id));
+    node.addEventListener("focus", () => {
+      openPathPickerForField(node.id).catch((err) => {
+        notify("error", err.message);
+        setOutput(err.message);
+      });
+    });
+    node.addEventListener("click", () => {
+      openPathPickerForField(node.id).catch((err) => {
+        notify("error", err.message);
+        setOutput(err.message);
+      });
+    });
   });
-  el("save-write-credential").addEventListener("click", () =>
+  bindEvent("save-write-credential", "click", () =>
     withFeedback(saveWriteCredential, "写凭证已保存")().catch(() => {}),
   );
-  el("delete-write-credential").addEventListener("click", () =>
+  bindEvent("delete-write-credential", "click", () =>
     withFeedback(deleteWriteCredential, "写凭证已删除")().catch(() => {}),
   );
-  el("upload-app").addEventListener("click", () => withFeedback(uploadAppFile, "文件已上传到 Knowledge App 目录")().catch(() => {}));
-  el("refresh-uploads").addEventListener("click", () => withFeedback(refreshUploads, "上传记录已刷新")().catch(() => {}));
+  bindEvent("bootstrap-warehouse-uploads", "click", () =>
+    withFeedback(() => bootstrapWarehouseCredentials("uploads_bundle"), "uploads 读写凭证初始化完成")().catch(() => {}),
+  );
+  bindEvent("bootstrap-warehouse-app-root", "click", () =>
+    withFeedback(() => bootstrapWarehouseCredentials("app_root_write"), "app 根写凭证初始化完成")().catch(() => {}),
+  );
+  bindEvent("clear-warehouse-temp-session", "click", () =>
+    withFeedback(() => clearWarehouseTempSession(), "warehouse 临时会话已清理")().catch(() => {}),
+  );
+  bindEvent("upload-app", "click", () => withFeedback(uploadAppFile, "文件已上传到 Knowledge App 目录")().catch(() => {}));
+  bindEvent("refresh-uploads", "click", () => withFeedback(refreshUploads, "上传记录已刷新")().catch(() => {}));
 
-  el("create-import-task").addEventListener("click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
-  el("create-reindex-task").addEventListener("click", () => withFeedback(createReindexTask, "重建任务已创建")().catch(() => {}));
-  el("create-delete-task").addEventListener("click", () => withFeedback(createDeleteTask, "删除任务已创建")().catch(() => {}));
-  el("create-import-from-bindings").addEventListener("click", () =>
+  bindEvent("create-import-task", "click", () => withFeedback(() => createImportTask(), "导入任务已创建")().catch(() => {}));
+  bindEvent("create-reindex-task", "click", () => withFeedback(createReindexTask, "重建任务已创建")().catch(() => {}));
+  bindEvent("create-delete-task", "click", () => withFeedback(createDeleteTask, "删除任务已创建")().catch(() => {}));
+  bindEvent("create-import-from-bindings", "click", () =>
     withFeedback(createImportTaskFromBindings, "已按绑定源创建导入任务")().catch(() => {}),
   );
-  el("create-reindex-from-bindings").addEventListener("click", () =>
+  bindEvent("create-reindex-from-bindings", "click", () =>
     withFeedback(createReindexTaskFromBindings, "已按绑定源创建重建任务")().catch(() => {}),
   );
-  el("create-delete-from-bindings").addEventListener("click", () =>
+  bindEvent("create-delete-from-bindings", "click", () =>
     withFeedback(createDeleteTaskFromBindings, "已按绑定源创建删除任务")().catch(() => {}),
   );
-  el("clear-task-filter").addEventListener("click", () => {
+  bindEvent("clear-task-filter", "click", () => {
     el("task-status-filter").value = "";
     refreshTasks().catch((err) => {
       notify("error", err.message);
       setOutput(err.message);
     });
   });
-  el("task-status-filter").addEventListener("change", () => {
+  bindEvent("task-status-filter", "change", () => {
     refreshTasks().catch((err) => {
       notify("error", err.message);
       setOutput(err.message);
     });
   });
-  el("refresh-tasks").addEventListener("click", () => withFeedback(refreshTasks, "任务列表已刷新")().catch(() => {}));
-  el("process-pending-tasks").addEventListener("click", () => withFeedback(processPendingTasks, "已处理待执行任务")().catch(() => {}));
+  bindEvent("refresh-tasks", "click", () => withFeedback(refreshTasks, "任务列表已刷新")().catch(() => {}));
+  bindEvent("process-pending-tasks", "click", () => withFeedback(processPendingTasks, "已处理待执行任务")().catch(() => {}));
 
-  el("clear-document-filter").addEventListener("click", () => {
+  bindEvent("clear-document-filter", "click", () => {
     el("document-filter").value = "";
     renderDocuments();
   });
-  el("document-filter").addEventListener("input", () => renderDocuments());
-  el("refresh-documents").addEventListener("click", () => withFeedback(refreshDocuments, "文档列表已刷新")().catch(() => {}));
-  el("run-search-lab").addEventListener("click", () => withFeedback(runSearchLabCompare, "Search Lab 对比已更新")().catch(() => {}));
-  el("refresh-search-lab").addEventListener("click", () =>
+  bindEvent("document-filter", "input", () => renderDocuments());
+  bindEvent("refresh-documents", "click", () => withFeedback(refreshDocuments, "文档列表已刷新")().catch(() => {}));
+  bindEvent("run-search-lab", "click", () => withFeedback(runSearchLabCompare, "Search Lab 对比已更新")().catch(() => {}));
+  bindEvent("refresh-search-lab", "click", () =>
     withFeedback(async () => {
       await Promise.all([refreshRetrievalLogs(), refreshSourceGovernance()]);
       renderSearchLabCompare();
     }, "Search Lab 数据已刷新")().catch(() => {}),
   );
-  el("refresh-retrieval-logs").addEventListener("click", () => withFeedback(refreshRetrievalLogs, "检索日志已刷新")().catch(() => {}));
-  el("refresh-source-governance").addEventListener("click", () =>
+  bindEvent("refresh-retrieval-logs", "click", () => withFeedback(refreshRetrievalLogs, "检索日志已刷新")().catch(() => {}));
+  bindEvent("refresh-source-governance", "click", () =>
     withFeedback(refreshSourceGovernance, "来源治理信息已刷新")().catch(() => {}),
   );
 
-  el("confirm-cancel").addEventListener("click", () => closeConfirm(false));
-  el("confirm-ok").addEventListener("click", () => closeConfirm(true));
-  el("drawer-close").addEventListener("click", () => closeDrawer());
-  el("detail-drawer").addEventListener("click", (event) => {
+  bindEvent("confirm-cancel", "click", () => closeConfirm(false));
+  bindEvent("confirm-ok", "click", () => closeConfirm(true));
+  bindEvent("drawer-close", "click", () => closeDrawer());
+  bindEvent("detail-drawer", "click", (event) => {
     if (event.target.id === "detail-drawer") {
       closeDrawer();
     }
   });
-  el("kb-editor-close").addEventListener("click", () => closeKBEditor());
-  el("kb-editor-drawer").addEventListener("click", (event) => {
+  bindEvent("kb-editor-close", "click", () => closeKBEditor());
+  bindEvent("kb-editor-drawer", "click", (event) => {
     if (event.target.id === "kb-editor-drawer") {
       closeKBEditor();
     }
   });
-  el("document-drawer-close").addEventListener("click", () => closeDocumentDrawer());
-  el("document-drawer").addEventListener("click", (event) => {
+  bindEvent("document-drawer-close", "click", () => closeDocumentDrawer());
+  bindEvent("document-drawer", "click", (event) => {
     if (event.target.id === "document-drawer") {
       closeDocumentDrawer();
     }
   });
-  el("path-picker-menu").addEventListener("click", (event) => {
+  bindEvent("path-picker-menu", "click", (event) => {
     if (event.target.id === "path-picker-menu") {
       closePathPicker();
     }
@@ -2728,7 +3137,10 @@ function attachStaticEvents() {
   });
 
   document.body.addEventListener("click", (event) => {
-    const pickerTarget = event.target.closest("[data-picker-select]");
+    const clickTarget = event.target;
+    if (!(clickTarget instanceof Element)) return;
+
+    const pickerTarget = clickTarget.closest("[data-picker-select]");
     if (pickerTarget) {
       const fieldId = pickerTarget.dataset.pickerTarget;
       const path = pickerTarget.dataset.pickerPath;
@@ -2741,7 +3153,7 @@ function attachStaticEvents() {
       }
       return;
     }
-    const pickerNav = event.target.closest("[data-picker-nav-path]");
+    const pickerNav = clickTarget.closest("[data-picker-nav-path]");
     if (pickerNav) {
       const path = pickerNav.dataset.pickerNavPath;
       if (path) {
@@ -2753,7 +3165,7 @@ function attachStaticEvents() {
       return;
     }
 
-    const target = event.target.closest("[data-action]");
+    const target = clickTarget.closest("[data-action]");
     if (!target) return;
     const { action } = target.dataset;
     if (action === "select-kb") {
@@ -2972,6 +3384,10 @@ function attachStaticEvents() {
 }
 
 attachStaticEvents();
+refreshWalletEnvironment().catch(() => {});
+window.addEventListener("focus", () => {
+  refreshWalletEnvironment().catch(() => {});
+});
 
 if (state.token && state.wallet) {
   setLoggedIn(state.wallet);

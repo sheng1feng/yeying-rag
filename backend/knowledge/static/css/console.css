@@ -489,6 +489,22 @@ textarea {
   gap: 12px;
 }
 
+.field-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.binding-form .toolbar {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
 .inline-form {
   display: grid;
   grid-template-columns: 1fr auto;

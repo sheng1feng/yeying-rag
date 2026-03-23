@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,7 @@ class AssetInventoryService:
         self.settings = get_settings()
         self.warehouse_gateway = warehouse_gateway or build_warehouse_gateway()
         self.warehouse_access_service = warehouse_access_service or WarehouseAccessService(warehouse_gateway=self.warehouse_gateway)
+        self.logger = logging.getLogger(__name__)
 
     def list_asset_snapshots(
         self,
@@ -87,8 +89,7 @@ class AssetInventoryService:
 
     def _iter_files(self, db: Session, wallet_address: str, source_path: str, kb_id: int | None = None) -> list[WarehouseFileEntry]:
         resolved = self._resolve_read_access(db, wallet_address, source_path, kb_id=kb_id)
-        entries = self.warehouse_gateway.browse(wallet_address, source_path, auth=resolved.auth)
-        self.warehouse_access_service.mark_access_success(resolved)
+        entries = self._browse_with_resolved_access(db, wallet_address, source_path, resolved)
         if len(entries) == 1 and entries[0].path == source_path and entries[0].entry_type == "file":
             return entries
         files: list[WarehouseFileEntry] = []
@@ -111,14 +112,12 @@ class AssetInventoryService:
         normalized_path = normalize_warehouse_path(path)
         parent = self._parent_path(normalized_path)
         read_access = resolved or self._resolve_read_access(db, wallet_address, parent, kb_id=kb_id)
-        entries = self.warehouse_gateway.browse(wallet_address, parent, auth=read_access.auth)
-        self.warehouse_access_service.mark_access_success(read_access)
+        entries = self._browse_with_resolved_access(db, wallet_address, parent, read_access)
         for entry in entries:
             if normalize_warehouse_path(entry.path) == normalized_path:
                 return entry
         if parent == normalized_path:
-            root_entries = self.warehouse_gateway.browse(wallet_address, normalized_path, auth=read_access.auth)
-            self.warehouse_access_service.mark_access_success(read_access)
+            root_entries = self._browse_with_resolved_access(db, wallet_address, normalized_path, read_access)
             for entry in root_entries:
                 if normalize_warehouse_path(entry.path) == normalized_path:
                     return entry
@@ -141,6 +140,32 @@ class AssetInventoryService:
             normalized_path,
             allow_write_fallback=True,
         )
+
+    def _browse_with_resolved_access(
+        self,
+        db: Session,
+        wallet_address: str,
+        path: str,
+        resolved: ResolvedWarehouseAccess,
+    ) -> list[WarehouseFileEntry]:
+        try:
+            entries = self.warehouse_gateway.browse(wallet_address, path, auth=resolved.auth)
+            self.warehouse_access_service.mark_access_success(resolved)
+            return entries
+        except Exception as exc:  # noqa: BLE001
+            if self.warehouse_access_service.is_auth_error(exc):
+                self.logger.warning(
+                    "warehouse browse auth failed during asset inventory",
+                    extra={
+                        "wallet_address": wallet_address,
+                        "path": path,
+                        "credential_id": resolved.credential.id,
+                        "credential_kind": resolved.credential.credential_kind,
+                    },
+                )
+                self.warehouse_access_service.mark_access_invalid(resolved)
+                db.commit()
+            raise
 
     @staticmethod
     def _snapshot_for_entry(entry: WarehouseFileEntry) -> AssetSnapshot:

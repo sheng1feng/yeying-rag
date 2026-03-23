@@ -4,12 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>knowledge console</title>
-    <link rel="stylesheet" href="/static/css/console.css" />
+    <link rel="stylesheet" href="/static/css/console.css?v={{ console_asset_version }}" />
     <script>
       window.__KNOWLEDGE_CONFIG__ = {
         warehouse_app_id: {{ warehouse_app_id | tojson }},
         warehouse_app_root: {{ warehouse_app_root | tojson }},
         warehouse_upload_dir: {{ warehouse_upload_dir | tojson }},
+        warehouse_base_url: {{ warehouse_base_url | tojson }},
+        warehouse_webdav_prefix: {{ warehouse_webdav_prefix | tojson }},
       };
     </script>
   </head>
@@ -203,14 +205,31 @@
                   <button class="secondary" id="refresh-bindings">刷新</button>
                 </div>
               </div>
-              <div class="inline-form">
-                <div class="path-input-wrap">
-                  <input id="binding-path" data-path-field="binding-path" placeholder="例如 {{ warehouse_upload_dir }}/a.txt" />
+              <div class="form-grid binding-form">
+                <div class="field-stack">
+                  <label for="binding-path" class="field-label">绑定源路径</label>
+                  <div class="path-input-wrap">
+                    <input id="binding-path" data-path-field="binding-path" placeholder="例如 {{ warehouse_upload_dir }}/a.txt" />
+                  </div>
                 </div>
-                <select id="binding-credential-id">
-                  <option value="">选择读凭证</option>
-                </select>
-                <button id="add-binding">绑定</button>
+                <div class="field-stack">
+                  <label for="binding-credential-id" class="field-label">读凭证</label>
+                  <select id="binding-credential-id">
+                    <option value="">选择读凭证</option>
+                  </select>
+                </div>
+                <div class="field-stack">
+                  <label for="binding-scope-type" class="field-label">绑定范围</label>
+                  <select id="binding-scope-type">
+                    <option value="auto">自动判断</option>
+                    <option value="directory">目录</option>
+                    <option value="file">文件</option>
+                  </select>
+                </div>
+                <div class="toolbar">
+                  <button class="secondary" id="use-current-browse-for-binding">使用当前浏览路径</button>
+                  <button id="add-binding">绑定</button>
+                </div>
               </div>
               <div class="helper">绑定源必须选择一把已导入的读凭证；路径只能落在当前 Knowledge App 目录且位于该凭证根路径下。</div>
               <div class="list" id="binding-list"></div>
@@ -284,6 +303,16 @@
               <div class="section-header">
                 <h2>写凭证 / 上传</h2>
               </div>
+              <div class="hint-box">
+                如果当前还没有可用 `ak/sk`，可以先通过一次性 `warehouse` 前台授权，自动创建 Knowledge App 目录并回填凭证。
+              </div>
+              <div class="toolbar">
+                <button id="bootstrap-warehouse-uploads">连接 warehouse 初始化 uploads 读写凭证</button>
+                <button id="bootstrap-warehouse-app-root" class="secondary">连接 warehouse 初始化 app 根写凭证</button>
+                <button id="clear-warehouse-temp-session" class="ghost">清理临时会话</button>
+              </div>
+              <div id="warehouse-bootstrap-status" class="detail-list empty">尚未连接临时 warehouse 会话。</div>
+              <hr />
               <div class="form-grid">
                 <input id="write-credential-key-id" placeholder="ak_xxx" />
                 <input id="write-credential-key-secret" placeholder="sk_xxx" />
@@ -643,8 +672,10 @@
       </div>
     </div>
 
-    <script src="/static/js/kb_workbench.js"></script>
-    <script src="/static/js/tasks_panel.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/kb_workbench.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/tasks_panel.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/wallet.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/warehouse_bridge.js?v={{ console_asset_version }}"></script>
+    <script src="/static/js/app.js?v={{ console_asset_version }}"></script>
   </body>
   </html>
