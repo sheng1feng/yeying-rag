@@ -20,8 +20,10 @@ from knowledge.schemas.warehouse import (
     UploadResponse,
     WarehouseBrowseResponse,
     WarehouseBootstrapChallengeResponse,
+    WarehouseBootstrapCleanupRequest,
     WarehouseBootstrapInitializeRequest,
     WarehouseBootstrapInitializeResponse,
+    WarehouseProvisioningAttemptRead,
     WarehouseCredentialCreateRequest,
     WarehouseCredentialRevealResponse,
     WarehouseCredentialSummary,
@@ -177,6 +179,45 @@ def warehouse_bootstrap_initialize(
         )
         raise HTTPException(status_code=400, detail=_warehouse_bootstrap_error_detail(exc)) from exc
     return WarehouseBootstrapInitializeResponse.model_validate(result)
+
+
+@router.get("/warehouse/bootstrap/attempts", response_model=list[WarehouseProvisioningAttemptRead])
+def list_warehouse_bootstrap_attempts(
+    limit: int = Query(default=20),
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> list[WarehouseProvisioningAttemptRead]:
+    attempts = warehouse_bootstrap_service.list_attempts(db, wallet_address, limit=limit)
+    return [WarehouseProvisioningAttemptRead.model_validate(warehouse_bootstrap_service.summarize_attempt(attempt)) for attempt in attempts]
+
+
+@router.get("/warehouse/bootstrap/attempts/{attempt_id}", response_model=WarehouseProvisioningAttemptRead)
+def get_warehouse_bootstrap_attempt(
+    attempt_id: int,
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> WarehouseProvisioningAttemptRead:
+    try:
+        attempt = warehouse_bootstrap_service.get_attempt_or_404(db, wallet_address, attempt_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return WarehouseProvisioningAttemptRead.model_validate(warehouse_bootstrap_service.summarize_attempt(attempt))
+
+
+@router.post("/warehouse/bootstrap/attempts/{attempt_id}/cleanup", response_model=WarehouseProvisioningAttemptRead)
+def request_warehouse_bootstrap_attempt_cleanup(
+    attempt_id: int,
+    payload: WarehouseBootstrapCleanupRequest,
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> WarehouseProvisioningAttemptRead:
+    try:
+        attempt = warehouse_bootstrap_service.request_cleanup(db, wallet_address, attempt_id, signature=payload.signature)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=_warehouse_bootstrap_error_detail(exc)) from exc
+    return WarehouseProvisioningAttemptRead.model_validate(warehouse_bootstrap_service.summarize_attempt(attempt))
 
 
 @router.get("/warehouse/credentials/read", response_model=list[WarehouseCredentialSummary])

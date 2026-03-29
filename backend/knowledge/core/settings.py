@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     warehouse_apps_prefix: str = "/apps"
     warehouse_mock_root: str = str(Path(__file__).resolve().parents[3] / ".mock_warehouse")
     token_encryption_secret: str = ""
+    warehouse_bootstrap_enable_reuse: bool = True
+    warehouse_bootstrap_key_name_prefix: str = "knowledge"
+    warehouse_bootstrap_write_expires_value: int = 0
+    warehouse_bootstrap_write_expires_unit: str = "day"
+    warehouse_bootstrap_read_expires_value: int = 0
+    warehouse_bootstrap_read_expires_unit: str = "day"
 
     vector_store_mode: str = "db"
     weaviate_url: str = "http://127.0.0.1:8080"

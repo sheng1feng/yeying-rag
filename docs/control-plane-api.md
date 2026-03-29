@@ -177,6 +177,59 @@
 - `partial_success` 当前作为正常 JSON 响应返回，前端应展示告警而不是把它当成纯成功。
 - `cleanup_status` 当前仅表达本地对补偿清理的已知状态，不表示远端已完成真正 revoke/delete。
 
+### `GET /warehouse/bootstrap/attempts`
+
+返回当前钱包最近的 bootstrap attempt 列表。
+
+参数：
+
+- `limit`
+
+返回字段示例：
+
+- `id`
+- `mode`
+- `target_path`
+- `status`
+- `stage`
+- `write_key_id`
+- `read_key_id`
+- `write_credential_id`
+- `read_credential_id`
+- `details_json`
+- `warnings`
+- `cleanup_status`
+- `created_at`
+- `updated_at`
+
+### `GET /warehouse/bootstrap/attempts/{attempt_id}`
+
+返回当前钱包下指定 bootstrap attempt 的详情。
+
+约束：
+
+- 只能读取当前钱包自己的 attempt
+- 其他钱包的 attempt 返回 `404`
+
+### `POST /warehouse/bootstrap/attempts/{attempt_id}/cleanup`
+
+用途：
+
+- 对当前钱包下的 bootstrap attempt 记录一次 cleanup 请求
+
+当前行为：
+
+- 当前 `knowledge` 还没有接入上游 `warehouse` 的 revoke/delete API
+- 因此该接口不会真的删除远端 key
+- 它会把 attempt 标记为“需要人工清理”，并记录 cleanup 请求时间
+
+当前 `cleanup_status` 语义：
+
+- `not_needed`
+  - 当前 attempt 不需要补偿清理
+- `manual_cleanup_required`
+  - 当前 attempt 已生成远端 key，但 `knowledge` 侧没有自动清理能力，需要人工去 `warehouse` 处理
+
 ### `GET /warehouse/status`
 
 返回当前 `warehouse` 绑定状态摘要。

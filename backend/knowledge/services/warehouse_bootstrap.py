@@ -7,13 +7,15 @@ from typing import Literal
 
 import httpx
 from eth_utils import to_checksum_address
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from knowledge.core.settings import Settings, get_settings
-from knowledge.models import WarehouseProvisioningAttempt
+from knowledge.models import WarehouseAccessCredential, WarehouseProvisioningAttempt
 from knowledge.services.warehouse import WarehouseGateway, WarehouseRequestAuth, build_warehouse_gateway
 from knowledge.services.warehouse_access import WarehouseAccessService
 from knowledge.services.warehouse_scope import warehouse_app_root, warehouse_default_upload_dir
+from knowledge.utils.time import utc_now
 
 
 WarehouseBootstrapMode = Literal["uploads_bundle", "app_root_write"]
@@ -36,8 +38,12 @@ class WarehouseBootstrapPlan:
     create_read_credential: bool
     write_name: str
     write_permissions: list[str]
+    write_expires_value: int
+    write_expires_unit: str
     read_name: str | None = None
     read_permissions: list[str] | None = None
+    read_expires_value: int | None = None
+    read_expires_unit: str | None = None
 
 
 class WarehouseBootstrapExecutionError(RuntimeError):
@@ -72,6 +78,54 @@ class WarehouseBootstrapService:
             "expires_at": data.get("expiresAt"),
         }
 
+    def list_attempts(self, db: Session, wallet_address: str, *, limit: int = 20) -> list[WarehouseProvisioningAttempt]:
+        query_limit = max(1, min(int(limit), 100))
+        return list(
+            db.scalars(
+                select(WarehouseProvisioningAttempt)
+                .where(WarehouseProvisioningAttempt.owner_wallet_address == wallet_address.lower())
+                .order_by(WarehouseProvisioningAttempt.created_at.desc(), WarehouseProvisioningAttempt.id.desc())
+                .limit(query_limit)
+            ).all()
+        )
+
+    def get_attempt_or_404(self, db: Session, wallet_address: str, attempt_id: int) -> WarehouseProvisioningAttempt:
+        attempt = db.get(WarehouseProvisioningAttempt, int(attempt_id))
+        if attempt is None or attempt.owner_wallet_address != wallet_address.lower():
+            raise LookupError("warehouse provisioning attempt not found")
+        return attempt
+
+    def request_cleanup(self, db: Session, wallet_address: str, attempt_id: int, *, signature: str) -> WarehouseProvisioningAttempt:
+        attempt = self.get_attempt_or_404(db, wallet_address, attempt_id)
+        details_json = dict(attempt.details_json or {})
+        cleanup_status = self._cleanup_status_for_attempt(
+            status=str(attempt.status),
+            details_json=details_json,
+            write_key_id=attempt.write_key_id,
+            read_key_id=attempt.read_key_id,
+        )
+        if cleanup_status == "not_needed":
+            return attempt
+
+        token = self._verify_signature(wallet_address, signature)
+        results: dict[str, str] = {}
+        if attempt.write_upstream_access_key_id:
+            results["write"] = self._revoke_access_key(token=token, access_key_id=str(attempt.write_upstream_access_key_id))
+        if attempt.read_upstream_access_key_id:
+            results["read"] = self._revoke_access_key(token=token, access_key_id=str(attempt.read_upstream_access_key_id))
+
+        details_json["cleanup_requested"] = True
+        details_json["cleanup_requested_at"] = utc_now().isoformat()
+        details_json["cleanup_results"] = results
+        details_json["cleanup_completed_at"] = utc_now().isoformat()
+        details_json["cleanup_status"] = "cleanup_completed"
+        attempt.details_json = details_json
+        attempt.stage = "cleanup_completed"
+        self._mark_local_credentials_revoked(db, attempt)
+        db.commit()
+        db.refresh(attempt)
+        return attempt
+
     def initialize_credentials(
         self,
         db: Session,
@@ -93,46 +147,49 @@ class WarehouseBootstrapService:
             current_stage = "verifying_signature"
             token = self._verify_signature(wallet_address, signature)
 
-            current_stage = "checking_local_reuse"
-            write_credential = warehouse_access_service.find_reusable_bootstrap_write_credential(
-                db,
-                wallet_address,
-                plan.target_path,
-                provisioning_mode=plan.mode,
-            )
-            if plan.create_read_credential:
-                read_credential = warehouse_access_service.find_reusable_bootstrap_read_credential(
+            if self.settings.warehouse_bootstrap_enable_reuse:
+                current_stage = "checking_local_reuse"
+                write_credential = warehouse_access_service.find_reusable_bootstrap_write_credential(
                     db,
                     wallet_address,
                     plan.target_path,
                     provisioning_mode=plan.mode,
                 )
-            if write_credential is not None and (not plan.create_read_credential or read_credential is not None):
-                self._apply_attempt_state(
-                    attempt,
-                    stage="reused_local_credentials",
-                    status="succeeded",
-                    write_key=self._credential_key_payload(write_credential),
-                    read_key=self._credential_key_payload(read_credential),
-                    write_credential_id=getattr(write_credential, "id", None),
-                    read_credential_id=getattr(read_credential, "id", None),
-                    error_message="",
-                )
-                db.commit()
-                db.refresh(attempt)
-                return self._build_result_payload(
-                    attempt=attempt,
-                    plan=plan,
-                    wallet_address=wallet_address,
-                    write_credential=warehouse_access_service.summarize(write_credential),
-                    read_credential=warehouse_access_service.summarize(read_credential) if read_credential is not None else None,
-                )
+                if plan.create_read_credential:
+                    read_credential = warehouse_access_service.find_reusable_bootstrap_read_credential(
+                        db,
+                        wallet_address,
+                        plan.target_path,
+                        provisioning_mode=plan.mode,
+                    )
+                if write_credential is not None and (not plan.create_read_credential or read_credential is not None):
+                    self._apply_attempt_state(
+                        attempt,
+                        stage="reused_local_credentials",
+                        status="succeeded",
+                        write_key=self._credential_key_payload(write_credential),
+                        read_key=self._credential_key_payload(read_credential),
+                        write_credential_id=getattr(write_credential, "id", None),
+                        read_credential_id=getattr(read_credential, "id", None),
+                        error_message="",
+                    )
+                    db.commit()
+                    db.refresh(attempt)
+                    return self._build_result_payload(
+                        attempt=attempt,
+                        plan=plan,
+                        wallet_address=wallet_address,
+                        write_credential=warehouse_access_service.summarize(write_credential),
+                        read_credential=warehouse_access_service.summarize(read_credential) if read_credential is not None else None,
+                    )
 
             current_stage = "creating_write_key"
             write_key = self._create_access_key(
                 token=token,
                 name=plan.write_name,
                 permissions=plan.write_permissions,
+                expires_value=plan.write_expires_value,
+                expires_unit=plan.write_expires_unit,
             )
 
             current_stage = "binding_write_key"
@@ -163,6 +220,8 @@ class WarehouseBootstrapService:
                     token=token,
                     name=plan.read_name,
                     permissions=plan.read_permissions,
+                    expires_value=int(plan.read_expires_value or 0),
+                    expires_unit=str(plan.read_expires_unit or "day"),
                 )
 
                 current_stage = "binding_read_key"
@@ -258,24 +317,31 @@ class WarehouseBootstrapService:
 
     def _build_plan(self, mode: WarehouseBootstrapMode) -> WarehouseBootstrapPlan:
         nonce = format(int(time() * 1000), "x")
+        prefix = str(self.settings.warehouse_bootstrap_key_name_prefix or "knowledge").strip() or "knowledge"
         if mode == "app_root_write":
             return WarehouseBootstrapPlan(
                 mode=mode,
                 mode_label="app 根写凭证",
                 target_path=warehouse_app_root(self.settings),
                 create_read_credential=False,
-                write_name=f"knowledge-app-root-write-{nonce}",
+                write_name=f"{prefix}-app-root-write-{nonce}",
                 write_permissions=["read", "create", "update"],
+                write_expires_value=int(self.settings.warehouse_bootstrap_write_expires_value),
+                write_expires_unit=str(self.settings.warehouse_bootstrap_write_expires_unit or "day"),
             )
         return WarehouseBootstrapPlan(
             mode="uploads_bundle",
             mode_label="uploads 读写凭证",
             target_path=warehouse_default_upload_dir(self.settings),
             create_read_credential=True,
-            write_name=f"knowledge-uploads-write-{nonce}",
+            write_name=f"{prefix}-uploads-write-{nonce}",
             write_permissions=["read", "create", "update"],
-            read_name=f"knowledge-uploads-read-{nonce}",
+            write_expires_value=int(self.settings.warehouse_bootstrap_write_expires_value),
+            write_expires_unit=str(self.settings.warehouse_bootstrap_write_expires_unit or "day"),
+            read_name=f"{prefix}-uploads-read-{nonce}",
             read_permissions=["read"],
+            read_expires_value=int(self.settings.warehouse_bootstrap_read_expires_value),
+            read_expires_unit=str(self.settings.warehouse_bootstrap_read_expires_unit or "day"),
         )
 
     def _verify_signature(self, wallet_address: str, signature: str) -> str:
@@ -303,7 +369,15 @@ class WarehouseBootstrapService:
                 f"knowledge 当前登录钱包地址不是有效的 EVM 地址：{candidate}。请退出后重新用正确的钱包地址登录。"
             ) from exc
 
-    def _create_access_key(self, *, token: str, name: str, permissions: list[str]) -> dict[str, object]:
+    def _create_access_key(
+        self,
+        *,
+        token: str,
+        name: str,
+        permissions: list[str],
+        expires_value: int,
+        expires_unit: str,
+    ) -> dict[str, object]:
         payload = self._request_json(
             "POST",
             "/api/v1/public/webdav/access-keys/create",
@@ -311,8 +385,8 @@ class WarehouseBootstrapService:
             json_body={
                 "name": name,
                 "permissions": permissions,
-                "expiresValue": 0,
-                "expiresUnit": "day",
+                "expiresValue": int(expires_value),
+                "expiresUnit": str(expires_unit or "day"),
             },
         )
         key_id = str(payload.get("keyId") or "").strip()
@@ -329,6 +403,23 @@ class WarehouseBootstrapService:
             token=token,
             json_body={"id": access_key_id, "path": path},
         )
+
+    def _revoke_access_key(self, *, token: str, access_key_id: str) -> str:
+        try:
+            self._request_json(
+                "POST",
+                "/api/v1/public/webdav/access-keys/revoke",
+                token=token,
+                json_body={"id": access_key_id},
+            )
+            return "revoked"
+        except WarehouseBootstrapError as exc:
+            message = str(exc).lower()
+            if exc.status == 400 and "already revoked" in message:
+                return "already_revoked"
+            if exc.status == 404 and "not found" in message:
+                return "not_found"
+            raise
 
     def _ensure_directory_chain(self, *, token: str, target_path: str) -> None:
         self.warehouse_gateway.ensure_app_space(
@@ -441,6 +532,7 @@ class WarehouseBootstrapService:
         read_credential_id: int | None,
         error_message: str,
     ) -> None:
+        details_json = dict(attempt.details_json or {})
         attempt.stage = stage
         attempt.status = status
         attempt.write_upstream_access_key_id = str(write_key.get("id") or "").strip() if write_key is not None else None
@@ -450,12 +542,24 @@ class WarehouseBootstrapService:
         attempt.write_credential_id = write_credential_id
         attempt.read_credential_id = read_credential_id
         attempt.error_message = str(error_message or "")
-        attempt.details_json = {
+        details_json.update({
             "write_key_created": write_key is not None,
             "read_key_created": read_key is not None,
             "write_credential_saved": write_credential_id is not None,
             "read_credential_saved": read_credential_id is not None,
-        }
+        })
+        details_json["cleanup_status"] = WarehouseBootstrapService._cleanup_status_for_attempt(
+            status=str(status),
+            details_json=details_json,
+            write_key_id=attempt.write_key_id,
+            read_key_id=attempt.read_key_id,
+        )
+        if details_json["cleanup_status"] == "manual_cleanup_required":
+            details_json.setdefault(
+                "cleanup_notes",
+                "Remote revoke/delete API is not configured in knowledge; clean upstream keys manually.",
+            )
+        attempt.details_json = details_json
 
     @staticmethod
     def _build_result_payload(
@@ -486,13 +590,50 @@ class WarehouseBootstrapService:
                 details_json={
                     "write_credential_saved": write_credential is not None,
                     "read_credential_saved": read_credential is not None,
+                    "cleanup_status": WarehouseBootstrapService._cleanup_status_for_attempt(
+                        status=str(attempt.status),
+                        details_json={},
+                        write_key_id=attempt.write_key_id,
+                        read_key_id=attempt.read_key_id,
+                    ),
                 },
             ),
             "cleanup_status": WarehouseBootstrapService._cleanup_status_for_attempt(
                 status=str(attempt.status),
+                details_json={},
                 write_key_id=attempt.write_key_id,
                 read_key_id=attempt.read_key_id,
             ),
+        }
+
+    @staticmethod
+    def summarize_attempt(attempt: WarehouseProvisioningAttempt) -> dict[str, object]:
+        details_json = dict(attempt.details_json or {})
+        return {
+            "id": int(attempt.id),
+            "mode": str(attempt.mode),
+            "target_path": str(attempt.target_path),
+            "status": str(attempt.status),
+            "stage": str(attempt.stage),
+            "write_key_id": attempt.write_key_id,
+            "read_key_id": attempt.read_key_id,
+            "write_credential_id": attempt.write_credential_id,
+            "read_credential_id": attempt.read_credential_id,
+            "error_message": str(attempt.error_message or "") or None,
+            "details_json": details_json,
+            "warnings": WarehouseBootstrapService._build_warnings(
+                stage=str(attempt.stage),
+                status=str(attempt.status),
+                details_json=details_json,
+            ),
+            "cleanup_status": WarehouseBootstrapService._cleanup_status_for_attempt(
+                status=str(attempt.status),
+                details_json=details_json,
+                write_key_id=attempt.write_key_id,
+                read_key_id=attempt.read_key_id,
+            ),
+            "created_at": attempt.created_at,
+            "updated_at": attempt.updated_at,
         }
 
     @staticmethod
@@ -528,14 +669,25 @@ class WarehouseBootstrapService:
             warnings.append(
                 "write credential was saved locally, but bootstrap did not finish. Re-running bootstrap may create additional upstream keys until cleanup support lands."
             )
+        if str(details_json.get("cleanup_status") or "") == "manual_cleanup_required":
+            warnings.append("manual cleanup is required for the listed access keys")
         return warnings
 
     @staticmethod
-    def _cleanup_status_for_attempt(*, status: str, write_key_id: str | None, read_key_id: str | None) -> str:
+    def _cleanup_status_for_attempt(
+        *,
+        status: str,
+        details_json: dict[str, object],
+        write_key_id: str | None,
+        read_key_id: str | None,
+    ) -> str:
+        explicit = str(details_json.get("cleanup_status") or "").strip()
+        if explicit:
+            return explicit
         if status == "succeeded":
             return "not_needed"
         if write_key_id or read_key_id:
-            return "not_started"
+            return "manual_cleanup_required"
         return "not_needed"
 
     @staticmethod
@@ -563,3 +715,13 @@ class WarehouseBootstrapService:
             return datetime.fromisoformat(normalized)
         except ValueError:
             return None
+
+    @staticmethod
+    def _mark_local_credentials_revoked(db: Session, attempt: WarehouseProvisioningAttempt) -> None:
+        for credential_id in (attempt.write_credential_id, attempt.read_credential_id):
+            if credential_id is None:
+                continue
+            credential = db.get(WarehouseAccessCredential, int(credential_id))
+            if credential is None:
+                continue
+            credential.status = "revoked_local"

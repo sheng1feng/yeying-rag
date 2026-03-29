@@ -26,6 +26,10 @@ class WarehouseBootstrapInitializeRequest(BaseModel):
     signature: str
 
 
+class WarehouseBootstrapCleanupRequest(BaseModel):
+    signature: str
+
+
 class WarehouseBootstrapInitializeResponse(BaseModel):
     attempt_id: int
     status: Literal["succeeded", "partial_success", "failed"]
@@ -41,6 +45,24 @@ class WarehouseBootstrapInitializeResponse(BaseModel):
     error_message: str | None = None
     warnings: list[str] = []
     cleanup_status: str | None = None
+
+
+class WarehouseProvisioningAttemptRead(BaseModel):
+    id: int
+    mode: Literal["uploads_bundle", "app_root_write"]
+    target_path: str
+    status: str
+    stage: str
+    write_key_id: str | None = None
+    read_key_id: str | None = None
+    write_credential_id: int | None = None
+    read_credential_id: int | None = None
+    error_message: str | None = None
+    details_json: dict = {}
+    warnings: list[str] = []
+    cleanup_status: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class WarehouseCredentialSummary(BaseModel):
