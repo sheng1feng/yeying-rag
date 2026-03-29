@@ -703,6 +703,12 @@ def test_backend_proxy_bootstrap_reuses_existing_local_bootstrap_credentials(mon
                 request=httpx.Request(method, url),
                 content=b'{"message":"bound successfully"}',
             )
+        if url.endswith("/api/v1/public/webdav/access-keys/revoke") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                content=b'{"message":"revoked successfully"}',
+            )
 
         target = url.replace("https://webdav.yeying.pub/dav", "", 1)
         auth_header = (kwargs.get("headers") or {}).get("Authorization", "")
@@ -1094,6 +1100,12 @@ def test_bootstrap_attempt_cleanup_marks_manual_cleanup_request(monkeypatch):
                 200,
                 request=httpx.Request(method, url),
                 content=b'{"message":"bound successfully"}',
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/revoke") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                content=b'{"message":"revoked successfully"}',
             )
 
         target = url.replace("https://webdav.yeying.pub/dav", "", 1)

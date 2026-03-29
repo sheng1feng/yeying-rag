@@ -63,3 +63,17 @@
 - 已执行测试
   - `python3 -m pytest tests/test_app.py`
   - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall backend/knowledge tests/test_app.py`
+
+#### 批次 3
+
+- 目标
+  - cleanup revoke 测试桩补齐
+  - cleanup 流程回归覆盖修正
+- 主要修改文件
+  - `tests/test_app.py`
+  - `docs/warehouse-implementation-batches.md`
+- 对应提交
+  - `test(warehouse): cover cleanup revoke flow`
+- 已执行测试
+  - `python3 -m pytest tests/test_app.py`
+  - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall tests/test_app.py`
