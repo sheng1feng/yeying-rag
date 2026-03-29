@@ -93,6 +93,41 @@ class WarehouseBootstrapService:
             current_stage = "verifying_signature"
             token = self._verify_signature(wallet_address, signature)
 
+            current_stage = "checking_local_reuse"
+            write_credential = warehouse_access_service.find_reusable_bootstrap_write_credential(
+                db,
+                wallet_address,
+                plan.target_path,
+                provisioning_mode=plan.mode,
+            )
+            if plan.create_read_credential:
+                read_credential = warehouse_access_service.find_reusable_bootstrap_read_credential(
+                    db,
+                    wallet_address,
+                    plan.target_path,
+                    provisioning_mode=plan.mode,
+                )
+            if write_credential is not None and (not plan.create_read_credential or read_credential is not None):
+                self._apply_attempt_state(
+                    attempt,
+                    stage="reused_local_credentials",
+                    status="succeeded",
+                    write_key=self._credential_key_payload(write_credential),
+                    read_key=self._credential_key_payload(read_credential),
+                    write_credential_id=getattr(write_credential, "id", None),
+                    read_credential_id=getattr(read_credential, "id", None),
+                    error_message="",
+                )
+                db.commit()
+                db.refresh(attempt)
+                return self._build_result_payload(
+                    attempt=attempt,
+                    plan=plan,
+                    wallet_address=wallet_address,
+                    write_credential=warehouse_access_service.summarize(write_credential),
+                    read_credential=warehouse_access_service.summarize(read_credential) if read_credential is not None else None,
+                )
+
             current_stage = "creating_write_key"
             write_key = self._create_access_key(
                 token=token,
@@ -114,6 +149,12 @@ class WarehouseBootstrapService:
                 key_secret=str(write_key["keySecret"]),
                 root_path=plan.target_path,
                 commit=False,
+                credential_source="bootstrap",
+                upstream_access_key_id=str(write_key.get("id") or "").strip() or None,
+                provisioning_attempt_id=int(attempt.id),
+                provisioning_mode=plan.mode,
+                remote_name=str(write_key.get("name") or "").strip() or None,
+                expires_at=self._parse_expiry(write_key),
             )
 
             if plan.create_read_credential and plan.read_name and plan.read_permissions:
@@ -135,6 +176,12 @@ class WarehouseBootstrapService:
                     key_secret=str(read_key["keySecret"]),
                     root_path=plan.target_path,
                     commit=False,
+                    credential_source="bootstrap",
+                    upstream_access_key_id=str(read_key.get("id") or "").strip() or None,
+                    provisioning_attempt_id=int(attempt.id),
+                    provisioning_mode=plan.mode,
+                    remote_name=str(read_key.get("name") or "").strip() or None,
+                    expires_at=self._parse_expiry(read_key),
                 )
 
             self._apply_attempt_state(
@@ -434,9 +481,12 @@ class WarehouseBootstrapService:
             "read_credential": read_credential,
             "error_message": str(error_message or attempt.error_message or "") or None,
             "warnings": WarehouseBootstrapService._build_warnings(
+                stage=str(attempt.stage),
                 status=str(attempt.status),
-                write_credential=write_credential,
-                read_credential=read_credential,
+                details_json={
+                    "write_credential_saved": write_credential is not None,
+                    "read_credential_saved": read_credential is not None,
+                },
             ),
             "cleanup_status": WarehouseBootstrapService._cleanup_status_for_attempt(
                 status=str(attempt.status),
@@ -465,15 +515,20 @@ class WarehouseBootstrapService:
     @staticmethod
     def _build_warnings(
         *,
+        stage: str,
         status: str,
-        write_credential: dict[str, object] | None,
-        read_credential: dict[str, object] | None,
+        details_json: dict[str, object],
     ) -> list[str]:
-        if status == "partial_success" and write_credential is not None and read_credential is None:
-            return [
+        warnings: list[str] = []
+        if stage == "reused_local_credentials":
+            warnings.append("reused existing local bootstrap credentials; no new upstream access key was created")
+        write_saved = bool(details_json.get("write_credential_saved"))
+        read_saved = bool(details_json.get("read_credential_saved"))
+        if status == "partial_success" and write_saved and not read_saved:
+            warnings.append(
                 "write credential was saved locally, but bootstrap did not finish. Re-running bootstrap may create additional upstream keys until cleanup support lands."
-            ]
-        return []
+            )
+        return warnings
 
     @staticmethod
     def _cleanup_status_for_attempt(*, status: str, write_key_id: str | None, read_key_id: str | None) -> str:
@@ -482,3 +537,29 @@ class WarehouseBootstrapService:
         if write_key_id or read_key_id:
             return "not_started"
         return "not_needed"
+
+    @staticmethod
+    def _credential_key_payload(credential) -> dict[str, object] | None:
+        if credential is None:
+            return None
+        return {
+            "id": credential.upstream_access_key_id,
+            "keyId": credential.key_id,
+            "name": credential.remote_name,
+        }
+
+    @staticmethod
+    def _parse_expiry(payload: dict[str, object]):
+        raw = payload.get("expiresAt") or payload.get("expires_at")
+        if not raw:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        normalized = text.replace("Z", "+00:00")
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None

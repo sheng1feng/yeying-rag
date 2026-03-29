@@ -21,6 +21,8 @@ WRITE_CREDENTIAL_KIND = "read_write"
 ACTIVE_CREDENTIAL_STATUS = "active"
 INVALID_CREDENTIAL_STATUS = "invalid"
 REVOKED_LOCAL_CREDENTIAL_STATUS = "revoked_local"
+MANUAL_CREDENTIAL_SOURCE = "manual_import"
+BOOTSTRAP_CREDENTIAL_SOURCE = "bootstrap"
 
 
 @dataclass
@@ -45,6 +47,12 @@ class WarehouseAccessService:
         root_path: str,
         *,
         commit: bool = True,
+        credential_source: str = MANUAL_CREDENTIAL_SOURCE,
+        upstream_access_key_id: str | None = None,
+        provisioning_attempt_id: int | None = None,
+        provisioning_mode: str | None = None,
+        remote_name: str | None = None,
+        expires_at: datetime | None = None,
     ) -> WarehouseAccessCredential:
         normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
         self._validate_key_pair(key_id, key_secret)
@@ -59,6 +67,12 @@ class WarehouseAccessService:
             key_id=key_id,
             key_secret=key_secret,
             root_path=normalized_root,
+            credential_source=credential_source,
+            upstream_access_key_id=upstream_access_key_id,
+            provisioning_attempt_id=provisioning_attempt_id,
+            provisioning_mode=provisioning_mode,
+            remote_name=remote_name,
+            expires_at=expires_at,
         )
         credential.status = ACTIVE_CREDENTIAL_STATUS
         credential.last_verified_at = utc_now()
@@ -78,6 +92,12 @@ class WarehouseAccessService:
         root_path: str,
         *,
         commit: bool = True,
+        credential_source: str = MANUAL_CREDENTIAL_SOURCE,
+        upstream_access_key_id: str | None = None,
+        provisioning_attempt_id: int | None = None,
+        provisioning_mode: str | None = None,
+        remote_name: str | None = None,
+        expires_at: datetime | None = None,
     ) -> WarehouseAccessCredential:
         normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
         self._validate_key_pair(key_id, key_secret)
@@ -133,6 +153,12 @@ class WarehouseAccessService:
                 key_id=key_id.strip(),
                 encrypted_key_secret=self._encrypt(key_secret.strip()),
                 root_path=normalized_root,
+                credential_source=credential_source,
+                upstream_access_key_id=upstream_access_key_id,
+                provisioning_attempt_id=provisioning_attempt_id,
+                provisioning_mode=provisioning_mode,
+                remote_name=remote_name,
+                expires_at=expires_at,
                 status=ACTIVE_CREDENTIAL_STATUS,
             )
             db.add(credential)
@@ -140,6 +166,12 @@ class WarehouseAccessService:
             credential.key_id = key_id.strip()
             credential.encrypted_key_secret = self._encrypt(key_secret.strip())
             credential.root_path = normalized_root
+            credential.credential_source = credential_source
+            credential.upstream_access_key_id = upstream_access_key_id
+            credential.provisioning_attempt_id = provisioning_attempt_id
+            credential.provisioning_mode = provisioning_mode
+            credential.remote_name = remote_name
+            credential.expires_at = expires_at
             credential.status = ACTIVE_CREDENTIAL_STATUS
         credential.last_verified_at = utc_now()
         for stale in existing_items[1:]:
@@ -150,6 +182,48 @@ class WarehouseAccessService:
             db.flush()
         db.refresh(credential)
         return credential
+
+    def find_reusable_bootstrap_write_credential(
+        self,
+        db: Session,
+        wallet_address: str,
+        root_path: str,
+        *,
+        provisioning_mode: str,
+    ) -> WarehouseAccessCredential | None:
+        normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
+        credential = db.scalar(
+            select(WarehouseAccessCredential)
+            .where(WarehouseAccessCredential.owner_wallet_address == wallet_address.lower())
+            .where(WarehouseAccessCredential.credential_kind == WRITE_CREDENTIAL_KIND)
+            .where(WarehouseAccessCredential.credential_source == BOOTSTRAP_CREDENTIAL_SOURCE)
+            .where(WarehouseAccessCredential.provisioning_mode == provisioning_mode)
+            .where(WarehouseAccessCredential.root_path == normalized_root)
+            .where(WarehouseAccessCredential.status == ACTIVE_CREDENTIAL_STATUS)
+            .order_by(WarehouseAccessCredential.updated_at.desc(), WarehouseAccessCredential.id.desc())
+        )
+        return credential if self._credential_reusable(credential) else None
+
+    def find_reusable_bootstrap_read_credential(
+        self,
+        db: Session,
+        wallet_address: str,
+        root_path: str,
+        *,
+        provisioning_mode: str,
+    ) -> WarehouseAccessCredential | None:
+        normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
+        credential = db.scalar(
+            select(WarehouseAccessCredential)
+            .where(WarehouseAccessCredential.owner_wallet_address == wallet_address.lower())
+            .where(WarehouseAccessCredential.credential_kind == READ_CREDENTIAL_KIND)
+            .where(WarehouseAccessCredential.credential_source == BOOTSTRAP_CREDENTIAL_SOURCE)
+            .where(WarehouseAccessCredential.provisioning_mode == provisioning_mode)
+            .where(WarehouseAccessCredential.root_path == normalized_root)
+            .where(WarehouseAccessCredential.status == ACTIVE_CREDENTIAL_STATUS)
+            .order_by(WarehouseAccessCredential.updated_at.desc(), WarehouseAccessCredential.id.desc())
+        )
+        return credential if self._credential_reusable(credential) else None
 
     def list_read_credentials(self, db: Session, wallet_address: str) -> list[WarehouseAccessCredential]:
         return list(
@@ -400,10 +474,16 @@ class WarehouseAccessService:
         db: Session,
         *,
         wallet_address: str,
-        credential_kind: str,
-        key_id: str,
-        key_secret: str,
-        root_path: str,
+            credential_kind: str,
+            key_id: str,
+            key_secret: str,
+            root_path: str,
+            credential_source: str,
+            upstream_access_key_id: str | None,
+            provisioning_attempt_id: int | None,
+            provisioning_mode: str | None,
+            remote_name: str | None,
+            expires_at: datetime | None,
     ) -> WarehouseAccessCredential:
         existing = db.scalar(
             select(WarehouseAccessCredential)
@@ -419,11 +499,23 @@ class WarehouseAccessService:
                 key_id=key_id.strip(),
                 encrypted_key_secret=self._encrypt(key_secret.strip()),
                 root_path=root_path,
+                credential_source=credential_source,
+                upstream_access_key_id=upstream_access_key_id,
+                provisioning_attempt_id=provisioning_attempt_id,
+                provisioning_mode=provisioning_mode,
+                remote_name=remote_name,
+                expires_at=expires_at,
                 status=ACTIVE_CREDENTIAL_STATUS,
             )
             db.add(existing)
         else:
             existing.encrypted_key_secret = self._encrypt(key_secret.strip())
+            existing.credential_source = credential_source
+            existing.upstream_access_key_id = upstream_access_key_id
+            existing.provisioning_attempt_id = provisioning_attempt_id
+            existing.provisioning_mode = provisioning_mode
+            existing.remote_name = remote_name
+            existing.expires_at = expires_at
             existing.status = ACTIVE_CREDENTIAL_STATUS
         return existing
 
@@ -479,3 +571,13 @@ class WarehouseAccessService:
         if parent == ".":
             return normalized_path
         return normalize_warehouse_path(parent)
+
+    @staticmethod
+    def _credential_reusable(credential: WarehouseAccessCredential | None) -> bool:
+        if credential is None:
+            return False
+        if not str(credential.upstream_access_key_id or "").strip():
+            return False
+        if credential.expires_at is not None and credential.expires_at <= utc_now():
+            return False
+        return True

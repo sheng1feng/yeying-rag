@@ -21,6 +21,15 @@ SOURCE_BINDING_COLUMNS: dict[str, str] = {
     "credential_id": "INTEGER",
 }
 
+WAREHOUSE_ACCESS_CREDENTIAL_COLUMNS: dict[str, str] = {
+    "credential_source": "VARCHAR(32) NOT NULL DEFAULT 'manual_import'",
+    "upstream_access_key_id": "VARCHAR(128)",
+    "provisioning_attempt_id": "INTEGER",
+    "provisioning_mode": "VARCHAR(32)",
+    "remote_name": "VARCHAR(255)",
+    "expires_at": "DATETIME",
+}
+
 RUNTIME_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("import_tasks", "ix_import_tasks_status_created_at", "status, created_at"),
     ("import_tasks", "ix_import_tasks_owner_status_created_at", "owner_wallet_address, status, created_at"),
@@ -33,6 +42,7 @@ def ensure_runtime_schema(engine: Engine) -> None:
         _ensure_columns(connection, inspector, "import_tasks", TASK_COLUMNS)
         _ensure_columns(connection, inspector, "import_task_items", TASK_ITEM_COLUMNS)
         _ensure_columns(connection, inspector, "source_bindings", SOURCE_BINDING_COLUMNS)
+        _ensure_columns(connection, inspector, "warehouse_access_credentials", WAREHOUSE_ACCESS_CREDENTIAL_COLUMNS)
         inspector = inspect(connection)
         _ensure_indexes(connection, inspector)
 
