@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.encoders import jsonable_encoder
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,7 +34,7 @@ from knowledge.services.filetypes import infer_file_type
 from knowledge.services.parser import DocumentParser
 from knowledge.services.warehouse import build_warehouse_gateway
 from knowledge.services.warehouse_access import WarehouseAccessService
-from knowledge.services.warehouse_bootstrap import WarehouseBootstrapError, WarehouseBootstrapService
+from knowledge.services.warehouse_bootstrap import WarehouseBootstrapError, WarehouseBootstrapExecutionError, WarehouseBootstrapService
 from knowledge.services.warehouse_scope import ensure_current_app_path, warehouse_app_id, warehouse_app_root, warehouse_default_upload_dir
 
 
@@ -160,9 +161,16 @@ def warehouse_bootstrap_initialize(
             mode=payload.mode,
             warehouse_access_service=warehouse_access_service,
         )
-        db.commit()
+    except WarehouseBootstrapExecutionError as exc:
+        logger.exception(
+            "warehouse bootstrap completed with recoverable provisioning failure",
+            extra={"wallet_address": wallet_address, "mode": payload.mode},
+        )
+        payload = jsonable_encoder(exc.payload)
+        if payload.get("status") == "partial_success":
+            return WarehouseBootstrapInitializeResponse.model_validate(payload)
+        raise HTTPException(status_code=400, detail=payload) from exc
     except Exception as exc:  # noqa: BLE001
-        db.rollback()
         logger.exception(
             "failed to initialize warehouse bootstrap credentials",
             extra={"wallet_address": wallet_address, "mode": payload.mode},

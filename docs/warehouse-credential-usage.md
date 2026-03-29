@@ -79,6 +79,8 @@
 - 不会落到 `knowledge` 后端数据库
 - 推荐优先使用 `uploads` 模式，它会同时回填一把 uploads 写凭证和一把 uploads 读凭证
 - `app 根写凭证` 模式默认只回填写凭证，后续读凭证仍建议按目录最小权限单独创建
+- 当前 bootstrap 响应已经带 `attempt_id`、`status`、`stage`
+- 如果看到 `partial_success`，通常表示写凭证已经回填，但读凭证未完整完成；此时不应把这次初始化当成完全成功
 
 ### 导入读凭证
 

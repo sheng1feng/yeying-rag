@@ -25,6 +25,7 @@ from knowledge.models.entities import (
     UploadRecord,
     WalletUser,
     WarehouseAccessCredential,
+    WarehouseProvisioningAttempt,
     WorkerStatus,
 )
 
@@ -55,5 +56,6 @@ __all__ = [
     "UploadRecord",
     "WalletUser",
     "WarehouseAccessCredential",
+    "WarehouseProvisioningAttempt",
     "WorkerStatus",
 ]

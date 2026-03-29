@@ -30,6 +30,7 @@ SERVICE_GRANT_RELEASE_SELECTION_MODES = ("latest_published", "pinned_release")
 RETRIEVAL_QUERY_MODES = ("formal_first", "formal_only", "evidence_only", "audit", "search_lab_compare")
 WAREHOUSE_ACCESS_CREDENTIAL_KINDS = ("read", "read_write")
 WAREHOUSE_ACCESS_CREDENTIAL_STATUSES = ("active", "invalid", "revoked_local")
+WAREHOUSE_PROVISIONING_STATUSES = ("running", "succeeded", "partial_success", "failed")
 
 
 class WalletUser(Base):
@@ -236,6 +237,30 @@ class WarehouseAccessCredential(Base):
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class WarehouseProvisioningAttempt(Base):
+    __tablename__ = "warehouse_provisioning_attempts"
+    __table_args__ = (
+        Index("ix_warehouse_provisioning_owner_created_at", "owner_wallet_address", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    owner_wallet_address: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
+    stage: Mapped[str] = mapped_column(String(64), default="started", nullable=False)
+    write_upstream_access_key_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    write_key_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    read_upstream_access_key_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    read_key_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    write_credential_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    read_credential_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    details_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

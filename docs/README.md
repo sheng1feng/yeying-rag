@@ -16,6 +16,12 @@
   - 当前 `warehouse` 鉴权、绑定与兼容策略的主说明。
 - `docs/warehouse-credential-usage.md`
   - 面向控制台操作的读凭证 / 写凭证使用说明。
+- `docs/warehouse-access-deep-dive.md`
+  - 从真实代码出发整理 `warehouse` 访问全景、调用链、失败语义与排障要点。
+- `docs/warehouse-aksk-creation-review.md`
+  - 聚焦真实 `bound_token` 路径下 `ak/sk` 的创建、绑定、回填流程，并从批判视角评审优化空间。
+- `docs/warehouse-aksk-remediation-plan.md`
+  - 面向工程落地的正式改造计划，包含问题分级、代码改动点、测试计划和阶段划分。
 - `docs/api-integration.md`
   - 面向外部服务接入。
   - `service search`、`grant`、`release` 相关内容仍有参考价值。
@@ -37,6 +43,9 @@
 
 - `warehouse` 鉴权重构设计说明
 - `warehouse` 凭证使用说明
+- `warehouse` 访问全景与问题排查
+- `warehouse` `ak/sk` 创建流程评审
+- `warehouse` `ak/sk` 改造计划
 - `warehouse` 收口 TODO
 - 控制面 API 文档
 

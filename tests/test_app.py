@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import timedelta
 from sqlalchemy.exc import OperationalError
 from eth_account import Account
@@ -11,7 +12,7 @@ from tests.helpers import configure_warehouse_credentials
 
 from knowledge.db.session import engine, session_scope
 from knowledge.main import app
-from knowledge.models import ImportTask
+from knowledge.models import ImportTask, WarehouseProvisioningAttempt
 from knowledge.api.routes_console import CONSOLE_ASSET_VERSION
 from knowledge.services.warehouse import BoundTokenWarehouseGateway, WarehouseFileEntry, WarehouseGateway, WarehouseRequestAuth
 from knowledge.services.warehouse_access import WarehouseAccessService
@@ -441,6 +442,11 @@ def test_backend_proxy_bootstrap_initializes_warehouse_without_browser_cors(monk
         )
         assert initialize.status_code == 200
         payload = initialize.json()
+        assert payload["status"] == "succeeded"
+        assert payload["stage"] == "completed"
+        assert payload["attempt_id"] > 0
+        assert payload["warnings"] == []
+        assert payload["cleanup_status"] == "not_needed"
         assert payload["target_path"] == UPLOADS_ROOT
         assert payload["write_key_id"] == "ak_bootstrap_1"
         assert payload["read_key_id"] == "ak_bootstrap_2"
@@ -453,6 +459,170 @@ def test_backend_proxy_bootstrap_initializes_warehouse_without_browser_cors(monk
         read_credentials = client.get("/warehouse/credentials/read", headers=headers)
         assert read_credentials.status_code == 200
         assert read_credentials.json()[0]["key_id"] == "ak_bootstrap_2"
+
+        with session_scope() as db:
+            attempt = db.get(WarehouseProvisioningAttempt, int(payload["attempt_id"]))
+            assert attempt is not None
+            assert attempt.status == "succeeded"
+            assert attempt.stage == "completed"
+            assert attempt.write_key_id == "ak_bootstrap_1"
+            assert attempt.read_key_id == "ak_bootstrap_2"
+            assert attempt.write_credential_id is not None
+            assert attempt.read_credential_id is not None
+
+
+def test_backend_proxy_bootstrap_returns_structured_partial_failure_when_read_credential_save_fails(monkeypatch):
+    from knowledge.api import routes_warehouse
+    from knowledge.services.warehouse_bootstrap import WarehouseBootstrapService
+
+    account = Account.create()
+    created_paths: set[str] = set()
+    access_key_counter = {"value": 0}
+
+    def _decode_basic_username(header_value: str) -> str:
+        raw = header_value.removeprefix("Basic ").strip()
+        decoded = base64.b64decode(raw).decode("utf-8")
+        return decoded.split(":", 1)[0]
+
+    def fake_request(method: str, url: str, **kwargs):
+        method = method.upper()
+        if url.endswith("/api/v1/public/auth/challenge") and method == "POST":
+            body = kwargs.get("json") or {}
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": str(body.get("address") or "").lower(),
+                        "challenge": "warehouse bootstrap challenge",
+                        "nonce": "nonce-1",
+                        "issuedAt": 1,
+                        "expiresAt": 2,
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/auth/verify") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "address": account.address.lower(),
+                        "token": "warehouse-bearer-token",
+                    },
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/create") and method == "POST":
+            access_key_counter["value"] += 1
+            idx = access_key_counter["value"]
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                json={
+                    "id": f"uuid-{idx}",
+                    "name": f"key-{idx}",
+                    "keyId": f"ak_bootstrap_{idx}",
+                    "keySecret": f"sk_bootstrap_{idx}",
+                    "permissions": ["read", "create", "update"] if idx == 1 else ["read"],
+                    "bindingPaths": [],
+                    "status": "active",
+                    "createdAt": "2026-03-24T00:00:00+08:00",
+                },
+            )
+        if url.endswith("/api/v1/public/webdav/access-keys/bind") and method == "POST":
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, url),
+                content=b'{"message":"bound successfully"}',
+            )
+
+        target = url.replace("https://webdav.yeying.pub/dav", "", 1)
+        auth_header = (kwargs.get("headers") or {}).get("Authorization", "")
+        if method == "PROPFIND":
+            if auth_header.startswith("Bearer "):
+                status = 207 if target in created_paths else 404
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+            if auth_header.startswith("Basic "):
+                username = _decode_basic_username(auth_header)
+                if username == "ak_bootstrap_2":
+                    request = httpx.Request(method, url)
+                    response = httpx.Response(401, request=request, text="")
+                    raise httpx.HTTPStatusError("401 Unauthorized", request=request, response=response)
+                status = 207 if target in created_paths else 404
+                if status == 207:
+                    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/dav{target}</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection /></d:resourcetype>
+        <d:getcontentlength>0</d:getcontentlength>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>"""
+                    return httpx.Response(status, request=httpx.Request(method, url), text=xml)
+                return httpx.Response(status, request=httpx.Request(method, url), text="")
+        if method == "MKCOL":
+            created_paths.add(target.rstrip("/") or "/")
+            return httpx.Response(201, request=httpx.Request(method, url))
+
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(httpx, "request", fake_request)
+    bound_gateway = BoundTokenWarehouseGateway(base_url="https://webdav.yeying.pub", webdav_prefix="/dav")
+    monkeypatch.setattr(routes_warehouse, "warehouse_access_service", WarehouseAccessService(warehouse_gateway=bound_gateway))
+    monkeypatch.setattr(routes_warehouse, "warehouse_bootstrap_service", WarehouseBootstrapService(warehouse_gateway=bound_gateway))
+
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        challenge = client.post("/warehouse/bootstrap/challenge", headers=headers)
+        assert challenge.status_code == 200
+        message = encode_defunct(text=challenge.json()["challenge"])
+        signed = Account.sign_message(message, account.key)
+
+        initialize = client.post(
+            "/warehouse/bootstrap/initialize",
+            headers=headers,
+            json={"mode": "uploads_bundle", "signature": signed.signature.hex()},
+        )
+        assert initialize.status_code == 200
+        detail = initialize.json()
+        assert detail["status"] == "partial_success"
+        assert detail["stage"] == "saving_read_credential"
+        assert detail["attempt_id"] > 0
+        assert detail["write_key_id"] == "ak_bootstrap_1"
+        assert detail["read_key_id"] == "ak_bootstrap_2"
+        assert detail["write_credential"]["key_id"] == "ak_bootstrap_1"
+        assert detail["read_credential"] is None
+        assert "warehouse rejected the access key" in detail["error_message"]
+        assert detail["cleanup_status"] == "not_started"
+        assert detail["warnings"]
+
+        write_credential = client.get("/warehouse/credentials/write", headers=headers)
+        assert write_credential.status_code == 200
+        assert write_credential.json()["credential"]["key_id"] == "ak_bootstrap_1"
+
+        read_credentials = client.get("/warehouse/credentials/read", headers=headers)
+        assert read_credentials.status_code == 200
+        assert read_credentials.json() == []
+
+        with session_scope() as db:
+            attempt = db.get(WarehouseProvisioningAttempt, int(detail["attempt_id"]))
+            assert attempt is not None
+            assert attempt.status == "partial_success"
+            assert attempt.stage == "saving_read_credential"
+            assert attempt.write_key_id == "ak_bootstrap_1"
+            assert attempt.read_key_id == "ak_bootstrap_2"
+            assert attempt.write_credential_id is not None
+            assert attempt.read_credential_id is None
 
 
 def test_warehouse_app_only_paths_reject_personal_scope():

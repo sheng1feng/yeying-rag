@@ -35,6 +35,10 @@ const state = {
   warehouseBootstrapWriteKeyId: "",
   warehouseBootstrapReadKeyId: "",
   warehouseBootstrapTargetPath: "",
+  warehouseBootstrapAttemptId: 0,
+  warehouseBootstrapStatus: "",
+  warehouseBootstrapCleanupStatus: "",
+  warehouseBootstrapWarnings: [],
   readCredentials: [],
   writeCredential: null,
   browseAccessSource: "",
@@ -610,7 +614,19 @@ async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+    const detail = data && typeof data === "object" ? data.detail : null;
+    const message =
+      typeof data === "string"
+        ? data
+        : typeof detail === "string"
+          ? detail
+          : typeof detail?.error_message === "string" && detail.error_message
+            ? detail.error_message
+            : JSON.stringify(data);
+    const error = new Error(message);
+    error.payload = data;
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -640,15 +656,23 @@ function setWarehouseBootstrapState(stage, message = "", extra = {}) {
   if (extra.targetPath !== undefined) state.warehouseBootstrapTargetPath = extra.targetPath || "";
   if (extra.writeKeyId !== undefined) state.warehouseBootstrapWriteKeyId = extra.writeKeyId || "";
   if (extra.readKeyId !== undefined) state.warehouseBootstrapReadKeyId = extra.readKeyId || "";
+  if (extra.attemptId !== undefined) state.warehouseBootstrapAttemptId = Number(extra.attemptId || 0);
+  if (extra.status !== undefined) state.warehouseBootstrapStatus = extra.status || "";
+  if (extra.cleanupStatus !== undefined) state.warehouseBootstrapCleanupStatus = extra.cleanupStatus || "";
+  if (extra.warnings !== undefined) state.warehouseBootstrapWarnings = Array.isArray(extra.warnings) ? extra.warnings : [];
   if (extra.wallet !== undefined) state.warehouseTempWallet = extra.wallet || "";
   writeSessionValue(WAREHOUSE_TEMP_WALLET_KEY, state.warehouseTempWallet);
   writeSessionValue(WAREHOUSE_TEMP_STAGE_KEY, state.warehouseTempStage);
   renderWarehouseBootstrapStatus();
   setOutput({
+    warehouse_attempt_id: state.warehouseBootstrapAttemptId || null,
+    warehouse_status: state.warehouseBootstrapStatus || "-",
     warehouse_stage: state.warehouseTempStage || "-",
     warehouse_mode: state.warehouseBootstrapMode || "-",
     warehouse_target_path: state.warehouseBootstrapTargetPath || "-",
     message: state.warehouseBootstrapError || state.warehouseBootstrapMessage || message || "",
+    warehouse_cleanup_status: state.warehouseBootstrapCleanupStatus || "",
+    warehouse_warnings: state.warehouseBootstrapWarnings,
     warehouse_base_url: state.warehouseBaseUrl || "-",
     ...("wallet" in extra ? { warehouse_wallet: extra.wallet } : {}),
     ...("writeKeyId" in extra ? { warehouse_write_key_id: extra.writeKeyId || "" } : {}),
@@ -664,6 +688,10 @@ function clearWarehouseTempSession() {
   state.warehouseBootstrapWriteKeyId = "";
   state.warehouseBootstrapReadKeyId = "";
   state.warehouseBootstrapTargetPath = "";
+  state.warehouseBootstrapAttemptId = 0;
+  state.warehouseBootstrapStatus = "";
+  state.warehouseBootstrapCleanupStatus = "";
+  state.warehouseBootstrapWarnings = [];
   renderWarehouseBootstrapStatus();
   setOutput({ ok: true, message: "warehouse 临时会话已清理" });
 }
@@ -758,16 +786,41 @@ async function bootstrapWarehouseCredentials(mode = "uploads_bundle") {
     });
 
     await Promise.all([refreshWarehouseStatus(), refreshWriteCredential(), refreshReadCredentials()]);
-    persistWarehouseTempSession({ token: "", wallet, stage: "ready" });
-    setWarehouseBootstrapState("ready", `${labels.modeLabel} 初始化完成`, {
+    persistWarehouseTempSession({ token: "", wallet, stage: result.stage || (result.status === "succeeded" ? "ready" : "partial_success") });
+    setWarehouseBootstrapState(result.stage || (result.status === "succeeded" ? "ready" : "partial_success"), result.error_message || `${labels.modeLabel} 初始化完成`, {
       mode: result.mode || mode,
       targetPath: result.target_path || targetPath,
       wallet,
       writeKeyId: result.write_key_id || "",
       readKeyId: result.read_key_id || "",
+      attemptId: result.attempt_id || 0,
+      status: result.status || "succeeded",
+      cleanupStatus: result.cleanup_status || "",
+      warnings: result.warnings || [],
     });
-    notify("success", `${labels.modeLabel} 初始化完成`);
+    if (result.status === "partial_success") {
+      notify("warning", result.error_message || `${labels.modeLabel} 部分完成`);
+    } else {
+      notify("success", `${labels.modeLabel} 初始化完成`);
+    }
+    return result;
   } catch (error) {
+    const detail = error && typeof error === "object" ? error.payload?.detail : null;
+    if (detail && typeof detail === "object") {
+      setWarehouseBootstrapState(detail.stage || "failed", "", {
+        mode: detail.mode || mode,
+        targetPath: detail.target_path || targetPath,
+        wallet,
+        writeKeyId: detail.write_key_id || "",
+        readKeyId: detail.read_key_id || "",
+        attemptId: detail.attempt_id || 0,
+        status: detail.status || "failed",
+        cleanupStatus: detail.cleanup_status || "",
+        warnings: detail.warnings || [],
+        error: detail.error_message || helper.formatWalletActionError?.(error, "warehouse 初始化失败，请稍后重试。") || String(error),
+      });
+      throw new Error(detail.error_message || "warehouse 初始化失败");
+    }
     const message = helper.formatWalletActionError?.(error, "warehouse 初始化失败，请稍后重试。") || String(error);
     setWarehouseBootstrapState("failed", "", {
       mode,
@@ -1722,7 +1775,14 @@ function renderWarehouseBootstrapStatus() {
   const stage = state.warehouseBootstrapMode
     ? `${state.warehouseBootstrapMode === "uploads_bundle" ? "uploads 读写凭证" : "app 根写凭证"} · ${state.warehouseTempStage || state.warehouseBootstrapMode}`
     : state.warehouseTempStage || (connected ? "authorized" : "idle");
-  const tone = state.warehouseBootstrapError ? "danger" : connected ? "success" : "warning";
+  const tone =
+    state.warehouseBootstrapStatus === "failed" || state.warehouseBootstrapError
+      ? "danger"
+      : state.warehouseBootstrapStatus === "partial_success"
+        ? "warning"
+        : connected || state.warehouseBootstrapStatus === "succeeded"
+          ? "success"
+          : "warning";
   const targetPath = state.warehouseBootstrapTargetPath || (state.warehouseBootstrapMode === "app_root_write" ? currentWarehouseAppRoot() : currentWarehouseUploadDir());
   const message =
     state.warehouseBootstrapError ||
@@ -1732,6 +1792,11 @@ function renderWarehouseBootstrapStatus() {
     `<div class="detail-list-item"><div class="detail-list-head"><strong>warehouse</strong><span class="pill ${tone}">${escapeHtml(stage)}</span></div><div class="helper">${escapeHtml(state.warehouseBaseUrl)}</div></div>`,
     `<div class="detail-list-item"><div class="detail-list-head"><strong>目标路径</strong><span class="pill">${escapeHtml(targetPath)}</span></div><div class="helper">${escapeHtml(message)}</div></div>`,
   ];
+  if (state.warehouseBootstrapAttemptId) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>最近一次尝试</strong><span class="pill ${tone}">${escapeHtml(state.warehouseBootstrapStatus || "-")}</span></div><div class="helper">attempt_id=${escapeHtml(String(state.warehouseBootstrapAttemptId))} · cleanup=${escapeHtml(state.warehouseBootstrapCleanupStatus || "-")}</div></div>`,
+    );
+  }
   if (connected) {
     details.push(
       `<div class="detail-list-item"><div class="detail-list-head"><strong>最近使用钱包</strong><span class="pill success">${escapeHtml(shortenMiddle(state.warehouseTempWallet || "-", 10, 6) || "-")}</span></div><div class="helper">浏览器只负责 challenge 签名；后续 warehouse API、access key 创建、目录创建与凭证回填都由 knowledge 后端代理执行。</div></div>`,
@@ -1740,6 +1805,11 @@ function renderWarehouseBootstrapStatus() {
   if (state.warehouseBootstrapWriteKeyId || state.warehouseBootstrapReadKeyId) {
     details.push(
       `<div class="detail-list-item"><div class="detail-list-head"><strong>最近生成的密钥</strong><span class="pill">${escapeHtml(state.warehouseBootstrapReadKeyId ? "读写已回填" : "写已回填")}</span></div><div class="helper">write=${escapeHtml(state.warehouseBootstrapWriteKeyId || "-")} · read=${escapeHtml(state.warehouseBootstrapReadKeyId || "-")}</div></div>`,
+    );
+  }
+  if (state.warehouseBootstrapWarnings.length) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>注意事项</strong><span class="pill warning">${escapeHtml(String(state.warehouseBootstrapWarnings.length))}</span></div><div class="helper">${escapeHtml(state.warehouseBootstrapWarnings.join(" "))}</div></div>`,
     );
   }
   box.className = "detail-list";
@@ -3041,12 +3111,8 @@ function attachStaticEvents() {
   bindEvent("delete-write-credential", "click", () =>
     withFeedback(deleteWriteCredential, "写凭证已删除")().catch(() => {}),
   );
-  bindEvent("bootstrap-warehouse-uploads", "click", () =>
-    withFeedback(() => bootstrapWarehouseCredentials("uploads_bundle"), "uploads 读写凭证初始化完成")().catch(() => {}),
-  );
-  bindEvent("bootstrap-warehouse-app-root", "click", () =>
-    withFeedback(() => bootstrapWarehouseCredentials("app_root_write"), "app 根写凭证初始化完成")().catch(() => {}),
-  );
+  bindEvent("bootstrap-warehouse-uploads", "click", () => bootstrapWarehouseCredentials("uploads_bundle").catch(() => {}));
+  bindEvent("bootstrap-warehouse-app-root", "click", () => bootstrapWarehouseCredentials("app_root_write").catch(() => {}));
   bindEvent("clear-warehouse-temp-session", "click", () =>
     withFeedback(() => clearWarehouseTempSession(), "warehouse 临时会话已清理")().catch(() => {}),
   );

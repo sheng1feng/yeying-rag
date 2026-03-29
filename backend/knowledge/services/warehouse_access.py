@@ -36,7 +36,16 @@ class WarehouseAccessService:
         self.fernet = Fernet(self.settings.token_encryption_secret.encode("utf-8"))
         self.warehouse_gateway = warehouse_gateway or build_warehouse_gateway()
 
-    def create_read_credential(self, db: Session, wallet_address: str, key_id: str, key_secret: str, root_path: str) -> WarehouseAccessCredential:
+    def create_read_credential(
+        self,
+        db: Session,
+        wallet_address: str,
+        key_id: str,
+        key_secret: str,
+        root_path: str,
+        *,
+        commit: bool = True,
+    ) -> WarehouseAccessCredential:
         normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
         self._validate_key_pair(key_id, key_secret)
         probe_auth = WarehouseRequestAuth.basic(key_id, key_secret)
@@ -53,11 +62,23 @@ class WarehouseAccessService:
         )
         credential.status = ACTIVE_CREDENTIAL_STATUS
         credential.last_verified_at = utc_now()
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         db.refresh(credential)
         return credential
 
-    def upsert_write_credential(self, db: Session, wallet_address: str, key_id: str, key_secret: str, root_path: str) -> WarehouseAccessCredential:
+    def upsert_write_credential(
+        self,
+        db: Session,
+        wallet_address: str,
+        key_id: str,
+        key_secret: str,
+        root_path: str,
+        *,
+        commit: bool = True,
+    ) -> WarehouseAccessCredential:
         normalized_root = ensure_current_app_path(root_path, "root_path", self.settings)
         self._validate_key_pair(key_id, key_secret)
         probe_auth = WarehouseRequestAuth.basic(key_id, key_secret)
@@ -123,7 +144,10 @@ class WarehouseAccessService:
         credential.last_verified_at = utc_now()
         for stale in existing_items[1:]:
             db.delete(stale)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         db.refresh(credential)
         return credential
 

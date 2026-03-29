@@ -2,6 +2,10 @@
 
 本文档只列当前方案必需的收口项，不列未来增强项。
 
+如果要看 `ak/sk` 创建链路的正式改造方案，参考：
+
+- `docs/warehouse-aksk-remediation-plan.md`
+
 ## 后端模型
 
 - 确认 `WarehouseAccessCredential` 字段已满足当前文档口径

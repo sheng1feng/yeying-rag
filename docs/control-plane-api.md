@@ -117,6 +117,66 @@
 
 ## 3. Warehouse 浏览与上传
 
+### `POST /warehouse/bootstrap/challenge`
+
+用途：
+
+- 请求当前钱包在 `warehouse` 侧的 challenge
+
+### `POST /warehouse/bootstrap/initialize`
+
+输入：
+
+```json
+{
+  "mode": "uploads_bundle",
+  "signature": "0x..."
+}
+```
+
+返回：
+
+```json
+{
+  "attempt_id": 12,
+  "status": "succeeded",
+  "stage": "completed",
+  "mode": "uploads_bundle",
+  "mode_label": "uploads 读写凭证",
+  "target_path": "/apps/knowledge.yeying.pub/uploads",
+  "write_key_id": "ak_xxx",
+  "read_key_id": "ak_yyy",
+  "warnings": [],
+  "cleanup_status": "not_needed"
+}
+```
+
+当前状态语义：
+
+- `succeeded`
+  - 写凭证 / 读凭证都已回填完成
+- `partial_success`
+  - 当前 bootstrap 已经产生部分结果，最常见是写凭证已经回填，但读凭证未完成
+- `failed`
+  - 当前 bootstrap 没有完成，仍应根据返回字段检查是否已生成上游 key 或本地部分状态
+
+当前阶段字段 `stage` 用于表达最近停在哪一步，例如：
+
+- `verifying_signature`
+- `creating_write_key`
+- `binding_write_key`
+- `ensuring_directories`
+- `saving_write_credential`
+- `creating_read_key`
+- `binding_read_key`
+- `saving_read_credential`
+- `completed`
+
+说明：
+
+- `partial_success` 当前作为正常 JSON 响应返回，前端应展示告警而不是把它当成纯成功。
+- `cleanup_status` 当前仅表达本地对补偿清理的已知状态，不表示远端已完成真正 revoke/delete。
+
 ### `GET /warehouse/status`
 
 返回当前 `warehouse` 绑定状态摘要。

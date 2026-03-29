@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
+from typing import Optional
 
 from pydantic import BaseModel
 
@@ -26,14 +27,20 @@ class WarehouseBootstrapInitializeRequest(BaseModel):
 
 
 class WarehouseBootstrapInitializeResponse(BaseModel):
+    attempt_id: int
+    status: Literal["succeeded", "partial_success", "failed"]
+    stage: str
     mode: Literal["uploads_bundle", "app_root_write"]
     mode_label: str
     wallet_address: str
     target_path: str
-    write_key_id: str
+    write_key_id: str | None = None
     read_key_id: str | None = None
-    write_credential: "WarehouseCredentialSummary"
-    read_credential: "WarehouseCredentialSummary | None" = None
+    write_credential: Optional["WarehouseCredentialSummary"] = None
+    read_credential: Optional["WarehouseCredentialSummary"] = None
+    error_message: str | None = None
+    warnings: list[str] = []
+    cleanup_status: str | None = None
 
 
 class WarehouseCredentialSummary(BaseModel):
