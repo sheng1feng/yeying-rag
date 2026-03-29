@@ -1,5 +1,9 @@
 # M1 / M2 技术方案
 
+本文档保留为历史技术方案参考。
+
+当前仓库中的公开接口、控制面行为和 `warehouse` 权限模型，请优先以 `docs/README.md`、`docs/api-integration.md` 和 `docs/control-plane-api.md` 为准。
+
 ## 1. 目标架构与现有架构差异
 
 ### 当前已有

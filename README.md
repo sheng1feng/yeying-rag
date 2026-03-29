@@ -30,9 +30,11 @@
 - `docs/console-operations.md`: 控制台操作手册
 - `docs/warehouse-auth-refactor.md`: `warehouse` 鉴权与绑定重构说明
 - `docs/warehouse-credential-usage.md`: `warehouse` 读写凭证使用说明
+- `docs/warehouse-current-status-summary.md`: `warehouse` 改造当前状态总览
+- `docs/warehouse-migration-guide.md`: 旧绑定 / 旧本地数据迁移说明
 - `docs/todo-warehouse-auth-refactor.md`: `warehouse` 鉴权收口 TODO
-- `docs/prd-bot-knowledge.md`: bot/chat 产品重构 PRD
-- `docs/technical-design-m1-m2.md`: M1 / M2 技术方案
+- `docs/prd-bot-knowledge.md`: bot/chat 历史 PRD 参考
+- `docs/technical-design-m1-m2.md`: M1 / M2 历史技术方案参考
 
 ## 运行
 
@@ -115,7 +117,7 @@ python -m knowledge.workers.runner
 当前代码支持两种资产网关：
 
 1. `mock`：本地目录模拟用户当前 `Knowledge App` 资产空间，便于开发测试
-2. `bound_token`：`knowledge` 代理访问上游 `warehouse`，当前主流程使用用户手工导入的 WebDAV `ak/sk` 凭证
+2. `bound_token`：`knowledge` 代理访问上游 `warehouse`，当前主流程使用 bootstrap 初始化或手工导入的 WebDAV `ak/sk` 凭证
 
 当前默认 app-only 配置：
 
@@ -125,10 +127,11 @@ python -m knowledge.workers.runner
 当前控制台默认流程为：
 
 1. 用户先登录 `knowledge`
-2. 用户手工导入一把写凭证和一把或多把读凭证
-3. 浏览 / 预览 / 绑定时显式选择读凭证或写凭证
-4. 上传只使用写凭证
-5. 导入 / 重建 / 删除任务按显式 `credential_id` 或 binding 绑定的读凭证执行
+2. 用户先使用 bootstrap 初始化读/写凭证，或手工导入一把写凭证和一把或多把读凭证
+3. 浏览 / 预览时显式选择读凭证，或显式切到写凭证浏览
+4. 绑定只使用读凭证
+5. 上传只使用写凭证
+6. 导入 / 重建 / 删除任务按显式读凭证或 binding 绑定的读凭证执行，手工任务不再接受写凭证显式透传
 
 兼容说明：
 
@@ -169,6 +172,8 @@ python -m knowledge.workers.runner
 - 控制台操作手册：`docs/console-operations.md`
 - `warehouse` 鉴权设计：`docs/warehouse-auth-refactor.md`
 - `warehouse` 凭证使用：`docs/warehouse-credential-usage.md`
+- `warehouse` 当前状态总览：`docs/warehouse-current-status-summary.md`
+- `warehouse` 迁移说明：`docs/warehouse-migration-guide.md`
 - `warehouse` 收口 TODO：`docs/todo-warehouse-auth-refactor.md`
-- 产品重构 PRD：`docs/prd-bot-knowledge.md`
-- M1 / M2 技术方案：`docs/technical-design-m1-m2.md`
+- 历史产品 PRD：`docs/prd-bot-knowledge.md`
+- 历史技术方案：`docs/technical-design-m1-m2.md`

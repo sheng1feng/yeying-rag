@@ -343,8 +343,8 @@
 
 前端动作：
 
-- 控制台点击“连接 warehouse 初始化 uploads 读写凭证”
-- 或点击“连接 warehouse 初始化 app 根写凭证”
+- 控制台点击“初始化 uploads 读写凭证（推荐）”
+- 或点击“只初始化 app 根写凭证（高级）”
 
 前端流程：
 
@@ -366,6 +366,7 @@
 
 - 当前主流程是“浏览器签名 + knowledge 后端代理调用上游”
 - 不是浏览器直接全量操作 `warehouse`
+- 如果返回 `manual_cleanup_required`，前端当前会显示 cleanup 入口，允许再次签名后撤销本次 bootstrap 生成的远端 key
 - 前端的 `warehouse_bridge.js` 仍保留了浏览器直连 helper，但当前控制台主流程实际走的是后端代理 bootstrap
 
 ### 8.2 导入读凭证
@@ -731,7 +732,7 @@ evidence build 的真实语义是：
 
 - 显式任务参数里的 `credential_id`
 - 或 `SourceBinding.credential_id`
-- 或允许时的写凭证回退
+- 或自动匹配到的 active 读凭证
 
 所以 `Source` 更像领域对象，真正访问授权仍由 binding 与 access service 决定。
 
@@ -750,11 +751,17 @@ evidence build 的真实语义是：
 
 所以“任务接口都一样会打仓库”这个理解不完全准确。
 
-### 13.3 写凭证回退存在，但不应该把它当作主设计
+### 13.3 当前读路径已经不再回退到写凭证
 
-当前后台某些流程允许 `allow_write_fallback=True`，是为了减少完全阻塞。
+当前后台的 browse / preview / source scan / task / evidence 读链路已经收口到：
 
-但长期推荐仍然是：
+- 显式读凭证
+- binding 绑定的读凭证
+- 自动匹配路径范围内的 active 读凭证
+
+也就是说，写凭证现在只承担写路径和显式写浏览，不再作为后台读路径兜底。
+
+长期推荐仍然是：
 
 - 浏览 / 绑定 / 后台读取走读凭证
 - 上传走写凭证

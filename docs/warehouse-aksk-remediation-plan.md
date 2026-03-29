@@ -1,8 +1,14 @@
 # Warehouse `ak/sk` 创建改造计划与执行状态
 
-本文档是在 `docs/warehouse-aksk-creation-review.md` 的问题分析基础上，给出一版可执行的改造计划。
+本文档是在 `docs/warehouse-aksk-creation-review.md` 的问题分析基础上形成的改造计划与执行状态记录。
 
 截至当前代码状态，这份计划里的主体工程已经不是“待开始”，而是“多数已落地，少数收口项待继续”。
+
+阅读方式：
+
+- 第 `0` 节用于描述当前执行状态与剩余项
+- 后续章节仍保留原始问题分析与改造方案，适合作为设计背景和审计依据
+- 如果需要判断当前仓库到底实现到了哪里，优先结合 `docs/warehouse-current-status-summary.md` 与真实代码一起看
 
 范围只覆盖真实 `bound_token` 场景下的：
 
@@ -34,9 +40,9 @@
 
 当前仍待继续的项：
 
-- 将整篇文档从“计划口吻”进一步回写为“现状口吻”
 - 评估 `SourceBinding` 根路径快照是否值得补模型
 - 决定是否彻底移除 `warehouse_bridge.js`
+- 评估是否要给本地 `revoke-local` 增加恢复动作
 
 ## 1. 目标
 

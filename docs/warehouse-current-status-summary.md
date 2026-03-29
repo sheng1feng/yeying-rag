@@ -1,42 +1,25 @@
 # Warehouse 改造当前状态总览
 
-本文档用于总结当前 `knowledge` 仓库中与 `warehouse` 相关改造的真实状态，方便后续继续开发、补提交和做阶段性回顾。
+本文档用于总结当前 `knowledge` 仓库中与 `warehouse` 相关改造的真实状态，方便后续继续开发和做阶段性回顾。
 
 如果本文件与旧设计文档冲突，以当前代码与本文件为准。
 
 ## 1. 当前仓库状态
 
-截至当前整理时：
+当前 `warehouse` 主链改造已经不再停留在“零散未提交改动”阶段，而是已经形成一套可追溯的代码与文档基线。
 
-- 当前分支：`pr/rebase-main`
-- 本地相对远端状态：`ahead 4`
-- 当前工作区不是干净状态，仍有一批未提交改动
+最近已经补齐到当前分支的三类闭环：
 
-当前未提交改动主要集中在：
+- 前端 / 产品收口
+- 读路径移除写凭证回退
+- 通用本地 `revoke-local` 管理
 
-- `backend/knowledge/api/routes_tasks.py`
-- `backend/knowledge/api/routes_warehouse.py`
-- `backend/knowledge/services/asset_inventory.py`
-- `backend/knowledge/services/evidence_pipeline.py`
-- `backend/knowledge/services/ingestion.py`
-- `backend/knowledge/services/warehouse_access.py`
-- `backend/knowledge/templates/index.html`
-- `backend/knowledge/static/js/app.js`
-- `backend/knowledge/static/js/warehouse_bridge.js`
-- `docs/todo-warehouse-auth-refactor.md`
-- `docs/control-plane-api.md`
-- `docs/warehouse-auth-refactor.md`
-- `docs/warehouse-credential-usage.md`
-- `docs/warehouse-migration-guide.md`
-- `docs/warehouse-implementation-batches.md`
-- `docs/warehouse-aksk-remediation-plan.md`
-- `tests/test_app.py`
+如果本文件与某个旧计划文档冲突，以当前代码、`docs/control-plane-api.md` 和本文件为准。
 
-这批改动目前覆盖三类闭环：
+如果需要确认阅读当下的瞬时 git 状态，请直接执行：
 
-- 前端/产品收口
-- 读路径去掉写凭证兜底
-- 通用本地 revoke 管理
+- `git status`
+- `git log --oneline`
 
 ## 2. 已完成的主链改造
 
@@ -55,33 +38,22 @@
 - 同 wallet + mode + target_path 的 bootstrap 已支持本地复用
 - 重复 bootstrap 不再默认无脑新建上游 key
 
-### 2.3 Attempt 查询接口
+### 2.3 Attempt 查询与 cleanup
 
 已提供：
 
 - `GET /warehouse/bootstrap/attempts`
 - `GET /warehouse/bootstrap/attempts/{attempt_id}`
+- `POST /warehouse/bootstrap/attempts/{attempt_id}/cleanup`
 
-作用：
+当前可用于：
 
 - 查询最近 attempt
 - 查看失败阶段
 - 查询 cleanup 状态
+- 对需要清理的 attempt 执行远端 revoke，并把本地关联 credential 标记为 `revoked_local`
 
-### 2.4 远端 cleanup 闭环
-
-当前 `knowledge` 已经接入上游 `warehouse` 的：
-
-- `POST /api/v1/public/webdav/access-keys/revoke`
-
-因此 cleanup 不再只是“登记人工请求”，而是可以：
-
-1. 再次请求钱包签名
-2. 后端代理换上游 token
-3. 调上游 revoke access key
-4. 把本地关联 credential 标记为 `revoked_local`
-
-### 2.5 Bootstrap 策略配置化
+### 2.4 Bootstrap 策略配置化
 
 bootstrap 策略已进入 `settings`：
 
@@ -98,7 +70,7 @@ bootstrap 策略已进入 `settings`：
 - TTL 可配置
 - 本地复用开关可配置
 
-### 2.6 前端/产品收口
+### 2.5 前端/产品收口
 
 当前前端已经基本收口到统一主路径：
 
@@ -108,7 +80,7 @@ bootstrap 策略已进入 `settings`：
 - 当 `cleanup_status=manual_cleanup_required` 时，前端已提供 cleanup 操作入口
 - `warehouse_bridge.js` 已明确标注为 legacy helper，不再被当作主流程说明
 
-### 2.7 读路径权限模型收口
+### 2.6 读路径权限模型收口
 
 当前已完成：
 
@@ -117,7 +89,7 @@ bootstrap 策略已进入 `settings`：
 - `asset_inventory`、`evidence_pipeline`、`ingestion` 这些读链路都已经移除写凭证回退
 - source scan / task / evidence 的自动选择现在最多只会选“匹配路径的读凭证”，不会再偷走写凭证
 
-### 2.8 通用本地 revoke 管理
+### 2.7 通用本地 revoke 管理
 
 当前已提供：
 
@@ -166,15 +138,14 @@ bootstrap 策略已进入 `settings`：
 
 下面这些是当前最明确的未完成项。
 
-### 5.1 技术计划文档还没有完全回写为“已完成状态”
+### 5.1 技术计划文档仍保留了大量原始方案结构
 
-`warehouse-aksk-remediation-plan.md` 仍主要是计划口吻。
+`warehouse-aksk-remediation-plan.md` 现在已经在文档头部补了“执行状态”说明，但中后段仍保留原始问题分析与方案结构。
 
-现在应当补一轮回写，明确：
+这没有错，但使用时要明确：
 
-- 已完成项
-- 剩余项
-- 当前优先级
+- 它更适合做设计背景与审计依据
+- 当前事实口径应优先回到代码与本文件
 
 ### 5.2 `warehouse_bridge.js` 仍是保留态 legacy helper
 
@@ -184,51 +155,30 @@ bootstrap 策略已进入 `settings`：
 
 这项在 TODO 里仍是“评估项”，目前没有单独的数据模型字段承接。
 
-## 6. 当前待提交批次
+### 5.4 本地 revoke 仍没有恢复动作
+
+当前只有 `revoke-local`，还没有与之对应的“恢复为 active”的控制面动作。
+
+## 6. 最近已落地批次
 
 当前批次记录见：
 
 - `docs/warehouse-implementation-batches.md`
 
-按该文档，当前最关键的待提交内容是：
+最近已经落到当前分支的关键批次是：
 
-### 批次 3
-
-- 前端/产品收口
-- cleanup 前端入口
-- `app_root_write` 模式文案收口
-
-建议 commit message：
-
-- `fix(console): tighten bootstrap product flow`
-
-### 批次 4
-
-- 读路径移除写凭证兜底
-- browse / preview 显式凭证语义收口
-- 任务显式 `credential_id` 限定为读凭证
-
-建议 commit message：
-
-- `fix(warehouse): remove write fallback from read paths`
-
-### 批次 5
-
-- 通用本地 revoke 管理动作
-- `revoked_local` 的前端入口和本地拒绝语义
-- 迁移说明与文档回写
-
-建议 commit message：
-
-- `feat(warehouse): add local credential revoke controls`
+- 批次 3：`935d119 fix(console): tighten bootstrap product flow`
+- 批次 4：`1657965 fix(warehouse): remove write fallback from read paths`
+- 批次 5：`ce0a871 feat(warehouse): add local credential revoke controls`
 
 ## 7. 建议下一步
 
-如果后续继续开发，而不是先补提交，我建议优先做：
+如果后续继续开发，我建议优先做：
 
-1. 回写 remediation plan / TODO，让文档和代码状态一致
+1. 继续收口 remediation plan / TODO，让文档和代码状态一致
 2. 决定是否彻底移除 `warehouse_bridge.js`
 3. 评估是否要给 `SourceBinding` 增加根路径快照
+4. 评估是否要给本地 `revoke-local` 增加恢复动作
 
 ## 8. 相关文档索引
 

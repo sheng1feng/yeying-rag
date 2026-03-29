@@ -12,6 +12,8 @@
 
 - `docs/control-plane-api.md`
   - 控制台与测试最常用的控制面接口汇总。
+- `docs/console-operations.md`
+  - 面向测试、运营与交付的控制台实际操作手册。
 - `docs/warehouse-auth-refactor.md`
   - 当前 `warehouse` 鉴权、绑定与兼容策略的主说明。
 - `docs/warehouse-credential-usage.md`
@@ -25,7 +27,7 @@
 - `docs/warehouse-implementation-batches.md`
   - 记录分批开发、测试和后续补提交所需的信息。
 - `docs/warehouse-current-status-summary.md`
-  - 汇总当前 `warehouse` 改造的真实完成度、未完成项、待提交批次与建议下一步。
+  - 汇总当前 `warehouse` 改造的真实完成度、最近已落地批次与建议下一步。
 - `docs/warehouse-migration-guide.md`
   - 说明从旧钱包绑定 / 旧本地数据迁移到当前凭证模型的建议步骤。
 - `docs/api-integration.md`
@@ -40,7 +42,7 @@
 
 - `docs/technical-design-m1-m2.md`
   - 主要描述检索与 memory 演进，不覆盖当前 `warehouse` 凭证模型、绑定关系和失败语义。
-  - 可作为历史设计背景，不应当作为当前鉴权设计文档。
+  - 可作为历史设计背景，不应当作为当前实现文档。
 - `docs/prd-bot-knowledge.md`
   - 仍主要服务 bot/chat 产品叙事。
   - 不覆盖当前控制台、绑定源、`warehouse` 权限收口后的操作事实。
@@ -48,6 +50,7 @@
 ## 当前已补齐的关键文档
 
 - `warehouse` 鉴权重构设计说明
+- `warehouse` 控制台操作手册
 - `warehouse` 凭证使用说明
 - `warehouse` 访问全景与问题排查
 - `warehouse` `ak/sk` 创建流程评审
@@ -74,6 +77,7 @@
 
 ## 后续文档建议
 
-- 当前关于 `warehouse` 的主文档已经切到“设计说明 + 使用说明 + 控制面 API + TODO”。
-- 后续如果旧绑定彻底下线，再补单独的迁移说明。
+- 当前关于 `warehouse` 的主文档已经切到“设计说明 + 使用说明 + 控制面 API + 操作手册 + 迁移说明 + TODO”。
+- 当前已经补到“状态总览 + 迁移说明”，后续应优先维护这些文档与代码事实一致。
+- `docs/technical-design-m1-m2.md` 与 `docs/prd-bot-knowledge.md` 继续保留为历史参考，不作为当前实现口径。
 - 在仓库决定是否引入 `knowledge/docs/` 之前，先避免同时维护两套文档目录。

@@ -1,5 +1,9 @@
 # Bot / Chat 知识库重构 PRD
 
+本文档保留为历史产品设计参考。
+
+当前仓库中的公开接口、控制面行为和 `warehouse` 权限模型，请优先以 `docs/README.md`、`docs/api-integration.md` 和 `docs/control-plane-api.md` 为准。
+
 ## 1. 背景与问题
 
 当前 `knowledge` 已具备基础的资产导入、索引、检索、记忆沉淀与控制台能力，但对 bot/chat 的对接形态仍偏“控制台驱动 + 单体接口”：
