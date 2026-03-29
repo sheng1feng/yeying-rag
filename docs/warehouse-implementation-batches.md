@@ -89,3 +89,25 @@
 - 已执行测试
   - `python3 -m pytest tests/test_app.py`
   - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall backend/knowledge tests/test_app.py`
+
+#### 批次 4
+
+- 目标
+  - 移除读路径里的写凭证兜底
+  - browse / preview 的显式 `credential_id` 限定为读凭证
+  - 任务显式 `credential_id` 限定为读凭证
+  - source scan / task / evidence 只允许自动选择匹配路径的读凭证
+- 状态
+  - 已完成开发、测试通过、待提交
+- 主要修改文件
+  - `backend/knowledge/api/routes_tasks.py`
+  - `backend/knowledge/services/asset_inventory.py`
+  - `backend/knowledge/services/evidence_pipeline.py`
+  - `backend/knowledge/services/ingestion.py`
+  - `backend/knowledge/services/warehouse_access.py`
+  - `backend/knowledge/static/js/app.js`
+  - `tests/test_app.py`
+- 对应提交
+  - `fix(warehouse): remove write fallback from read paths`
+- 已执行测试
+  - `python3 -m pytest tests/test_app.py`

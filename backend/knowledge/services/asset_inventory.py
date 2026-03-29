@@ -78,7 +78,6 @@ class AssetInventoryService:
                 wallet_address,
                 kb_id,
                 normalized_path,
-                allow_write_fallback=True,
             )
         if normalized_path == app_root and self.settings.warehouse_gateway_mode == "mock":
             return True, "directory"
@@ -138,7 +137,6 @@ class AssetInventoryService:
             wallet_address,
             kb_id,
             normalized_path,
-            allow_write_fallback=True,
         )
 
     def _browse_with_resolved_access(

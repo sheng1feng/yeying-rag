@@ -206,7 +206,7 @@ def test_end_to_end_auth_upload_import_search():
     with TestClient(app) as client:
         token = _login(client, account)
         headers = {"Authorization": f"Bearer {token}"}
-        configure_warehouse_credentials(client, headers)
+        credentials = configure_warehouse_credentials(client, headers)
 
         kb = client.post("/kbs", headers=headers, json={"name": "Personal KB", "description": "demo"}).json()
         kb_id = kb["id"]
@@ -225,7 +225,10 @@ def test_end_to_end_auth_upload_import_search():
         assert uploads.status_code == 200
         assert any(item["warehouse_target_path"] == upload_data["warehouse_path"] for item in uploads.json())
 
-        preview = client.get(f"/warehouse/preview?path={upload_data['warehouse_path']}", headers=headers)
+        preview = client.get(
+            f"/warehouse/preview?path={upload_data['warehouse_path']}&credential_id={credentials['read_credential_id']}",
+            headers=headers,
+        )
         assert preview.status_code == 200
         assert "warehouse and knowledge search" in preview.json()["preview"]
 
@@ -278,6 +281,86 @@ def test_end_to_end_auth_upload_import_search():
         ops_workers = client.get("/ops/workers", headers=headers)
         assert ops_workers.status_code == 200
         assert len(ops_workers.json()) >= 1
+
+
+def test_browse_rejects_write_credential_id_without_explicit_write_flag():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        credentials = configure_warehouse_credentials(client, headers)
+
+        browse = client.get(
+            f"/warehouse/browse?path={APP_ROOT}&credential_id={credentials['write_credential_id']}",
+            headers=headers,
+        )
+        assert browse.status_code == 400
+        assert "warehouse credential must be read" in browse.json()["detail"]
+
+        write_browse = client.get(f"/warehouse/browse?path={APP_ROOT}&use_write_credential=true", headers=headers)
+        assert write_browse.status_code == 200
+        assert write_browse.json()["credential_kind"] == "read_write"
+
+
+def test_direct_import_task_rejects_write_credential_id():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        credentials = configure_warehouse_credentials(client, headers)
+
+        kb = client.post("/kbs", headers=headers, json={"name": "Explicit Read Only", "description": "demo"}).json()
+        response = client.post(
+            f"/kbs/{kb['id']}/tasks/import",
+            headers=headers,
+            json={"source_paths": [APP_ROOT], "credential_id": credentials["write_credential_id"]},
+        )
+        assert response.status_code == 400
+        assert "warehouse credential must be read" in response.json()["detail"]
+
+
+def test_import_processing_no_longer_falls_back_to_write_credential():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        write_response = client.post(
+            "/warehouse/credentials/write",
+            headers=headers,
+            json={
+                "key_id": "ak_test_write_only",
+                "key_secret": "sk_test_write_only",
+                "root_path": APP_ROOT,
+            },
+        )
+        assert write_response.status_code == 200
+
+        kb = client.post("/kbs", headers=headers, json={"name": "Write Only Task", "description": "demo"}).json()
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": UPLOADS_ROOT},
+            files={"file": ("hello.txt", b"hello warehouse", "text/plain")},
+        )
+        assert upload.status_code == 200
+        warehouse_path = upload.json()["warehouse_path"]
+
+        task = client.post(
+            f"/kbs/{kb['id']}/tasks/import",
+            headers=headers,
+            json={"source_paths": [warehouse_path]},
+        )
+        assert task.status_code == 200
+
+        processed = client.post("/tasks/process-pending", headers=headers)
+        assert processed.status_code == 200
+        assert processed.json()["processed"] >= 1
+
+        task_detail = client.get(f"/tasks/{task.json()['id']}", headers=headers)
+        assert task_detail.status_code == 200
+        assert task_detail.json()["status"] == "partial_success"
+        assert "warehouse credential not found for path" in task_detail.json()["error_message"]
 
 
 def test_upload_succeeds_with_write_credential_scoped_to_uploads_subtree():

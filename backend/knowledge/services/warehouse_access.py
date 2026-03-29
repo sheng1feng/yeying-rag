@@ -246,6 +246,28 @@ class WarehouseAccessService:
             .order_by(WarehouseAccessCredential.updated_at.desc(), WarehouseAccessCredential.id.desc())
         )
 
+    def find_best_read_credential_for_path(
+        self,
+        db: Session,
+        wallet_address: str,
+        path: str,
+    ) -> WarehouseAccessCredential | None:
+        normalized_path = ensure_current_app_path(path, "path", self.settings)
+        credentials = list(
+            db.scalars(
+                select(WarehouseAccessCredential)
+                .where(WarehouseAccessCredential.owner_wallet_address == wallet_address.lower())
+                .where(WarehouseAccessCredential.credential_kind == READ_CREDENTIAL_KIND)
+                .where(WarehouseAccessCredential.status == ACTIVE_CREDENTIAL_STATUS)
+                .order_by(WarehouseAccessCredential.updated_at.desc(), WarehouseAccessCredential.id.desc())
+            ).all()
+        )
+        matches = [credential for credential in credentials if self.credential_covers_path(credential, normalized_path)]
+        if not matches:
+            return None
+        matches.sort(key=lambda credential: len(normalize_warehouse_path(credential.root_path)), reverse=True)
+        return matches[0]
+
     def reveal_secret(self, db: Session, wallet_address: str, credential_id: int, credential_kind: str | None = None) -> tuple[WarehouseAccessCredential, str]:
         credential = self._require_credential(db, wallet_address, credential_id, credential_kind)
         return credential, self._decrypt(credential.encrypted_key_secret)
@@ -298,10 +320,11 @@ class WarehouseAccessService:
         wallet_address: str,
         path: str,
         credential_id: int | None,
+        credential_kind: str | None = None,
     ) -> ResolvedWarehouseAccess | None:
         if credential_id is None:
             return None
-        credential = self._require_credential(db, wallet_address, credential_id, None)
+        credential = self._require_credential(db, wallet_address, credential_id, credential_kind)
         normalized_path = ensure_current_app_path(path, "path", self.settings)
         if not self.credential_covers_path(credential, normalized_path):
             raise ValueError(f"path exceeds credential scope: {normalized_path}")
@@ -326,15 +349,18 @@ class WarehouseAccessService:
         use_write_credential: bool = False,
     ) -> ResolvedWarehouseAccess:
         normalized_path = ensure_current_app_path(path, "path", self.settings)
-        explicit = self.resolve_explicit_access(db, wallet_address, normalized_path, credential_id)
+        explicit = self.resolve_explicit_access(
+            db,
+            wallet_address,
+            normalized_path,
+            credential_id,
+            READ_CREDENTIAL_KIND,
+        )
         if explicit is not None:
             return explicit
         if use_write_credential:
             return self.resolve_write_access(db, wallet_address, normalized_path)
-        write_credential = self.get_write_credential(db, wallet_address)
-        if write_credential is not None and self.credential_covers_path(write_credential, normalized_path):
-            return self._resolved_access(write_credential)
-        raise ValueError("warehouse browse requires credential_id or write credential")
+        raise ValueError("warehouse browse requires credential_id or use_write_credential=true")
 
     def resolve_path_read_access(
         self,
@@ -345,10 +371,15 @@ class WarehouseAccessService:
         *,
         preferred_binding_ids: list[int] | None = None,
         explicit_credential_id: int | None = None,
-        allow_write_fallback: bool = False,
     ) -> ResolvedWarehouseAccess:
         normalized_path = ensure_current_app_path(path, "path", self.settings)
-        explicit = self.resolve_explicit_access(db, wallet_address, normalized_path, explicit_credential_id)
+        explicit = self.resolve_explicit_access(
+            db,
+            wallet_address,
+            normalized_path,
+            explicit_credential_id,
+            READ_CREDENTIAL_KIND,
+        )
         if explicit is not None:
             return explicit
         binding = self.find_best_binding_for_path(db, kb_id, normalized_path, preferred_binding_ids=preferred_binding_ids)
@@ -357,8 +388,9 @@ class WarehouseAccessService:
             if not self.credential_covers_path(resolved.credential, normalized_path):
                 raise ValueError(f"path exceeds binding credential scope: {normalized_path}")
             return resolved
-        if allow_write_fallback:
-            return self.resolve_write_access(db, wallet_address, normalized_path)
+        read_credential = self.find_best_read_credential_for_path(db, wallet_address, normalized_path)
+        if read_credential is not None:
+            return self._resolved_access(read_credential)
         raise ValueError(f"warehouse credential not found for path: {normalized_path}")
 
     def find_best_binding_for_path(

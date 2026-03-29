@@ -133,7 +133,6 @@ class EvidencePipelineService:
             wallet_address,
             kb.id,
             asset.asset_path,
-            allow_write_fallback=True,
         )
         try:
             raw_content = self.warehouse_gateway.read_file(wallet_address, asset.asset_path, auth=resolved.auth)

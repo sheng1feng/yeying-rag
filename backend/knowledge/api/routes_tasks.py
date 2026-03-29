@@ -11,6 +11,7 @@ from knowledge.models import ImportTask, ImportTaskItem, KnowledgeBase, SourceBi
 from knowledge.schemas.tasks import BindingTaskCreateRequest, TaskCreateRequest, TaskResponse
 from knowledge.services.ingestion import IngestionService
 from knowledge.services.task_queue import TaskQueueService
+from knowledge.services.warehouse_access import WarehouseAccessService
 from knowledge.services.warehouse_scope import ensure_current_app_path
 from knowledge.utils.time import utc_now
 from knowledge.workers.runner import Worker
@@ -19,6 +20,7 @@ from knowledge.workers.runner import Worker
 router = APIRouter(tags=["ingestion_tasks"])
 ingestion_service = IngestionService()
 task_queue_service = TaskQueueService()
+warehouse_access_service = WarehouseAccessService()
 worker = Worker()
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "partial_success", "canceled"}
 
@@ -171,6 +173,30 @@ def _resolve_binding_paths(
     return source_paths, [binding.id for binding in bindings]
 
 
+def _explicit_read_task_stats(
+    db: Session,
+    wallet_address: str,
+    credential_id: int | None,
+    source_paths: list[str],
+) -> dict | None:
+    if credential_id in {None, 0}:
+        return None
+    try:
+        credential = warehouse_access_service.get_read_credential(db, wallet_address, int(credential_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for source_path in source_paths:
+        if not str(source_path or "").strip():
+            continue
+        try:
+            normalized_path = ensure_current_app_path(source_path, "source_path")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not warehouse_access_service.credential_covers_path(credential, normalized_path):
+            raise HTTPException(status_code=400, detail=f"source_path exceeds credential scope: {normalized_path}")
+    return {"explicit_credential_id": credential.id}
+
+
 @router.post("/kbs/{kb_id}/tasks/import", response_model=TaskResponse)
 def create_import_task(
     kb_id: int,
@@ -179,7 +205,7 @@ def create_import_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    stats_json = _explicit_read_task_stats(db, wallet_address, payload.credential_id, payload.source_paths)
     return _create_task(db, wallet_address, kb_id, "import", payload.source_paths, stats_json=stats_json)
 
 
@@ -191,7 +217,7 @@ def create_reindex_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    stats_json = _explicit_read_task_stats(db, wallet_address, payload.credential_id, payload.source_paths)
     return _create_task(db, wallet_address, kb_id, "reindex", payload.source_paths, stats_json=stats_json)
 
 
@@ -203,7 +229,7 @@ def create_delete_task(
     db: Session = Depends(get_db),
 ) -> ImportTask:
     _validate_kb(db, wallet_address, kb_id)
-    stats_json = {"explicit_credential_id": payload.credential_id} if payload.credential_id else None
+    stats_json = _explicit_read_task_stats(db, wallet_address, payload.credential_id, payload.source_paths)
     return _create_task(db, wallet_address, kb_id, "delete", payload.source_paths, stats_json=stats_json)
 
 

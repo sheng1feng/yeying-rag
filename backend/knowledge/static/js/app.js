@@ -200,9 +200,6 @@ function currentBrowseAccessSource() {
 
 function currentBrowseCredentialId() {
   const source = currentBrowseAccessSource();
-  if (source === "write") {
-    return currentWriteCredentialId();
-  }
   if (source.startsWith("read:")) {
     const value = Number(source.split(":")[1] || 0);
     return value > 0 ? value : null;
@@ -278,6 +275,8 @@ function updateWarehouseCredentialSelectors() {
   const browseSelect = el("warehouse-access-source");
   if (browseSelect) {
     const previous = String(state.browseAccessSource || browseSelect.value || "");
+    const activeReadCredentials = state.readCredentials.filter((credential) => credential.status === "active");
+    const activeWriteCredential = state.writeCredential?.status === "active" ? state.writeCredential : null;
     const options = [`<option value="">选择浏览凭证</option>`];
     if (state.writeCredential) {
       options.push(
@@ -291,17 +290,17 @@ function updateWarehouseCredentialSelectors() {
     });
     browseSelect.innerHTML = options.join("");
     const hasPrevious =
-      (previous === "write" && Boolean(state.writeCredential)) ||
-      state.readCredentials.some((credential) => `read:${credential.id}` === previous);
+      (previous === "write" && Boolean(activeWriteCredential)) ||
+      activeReadCredentials.some((credential) => `read:${credential.id}` === previous);
     if (hasPrevious) {
       browseSelect.value = previous;
       state.browseAccessSource = previous;
-    } else if (state.writeCredential) {
+    } else if (activeReadCredentials.length) {
+      browseSelect.value = `read:${activeReadCredentials[0].id}`;
+      state.browseAccessSource = browseSelect.value;
+    } else if (activeWriteCredential) {
       browseSelect.value = "write";
       state.browseAccessSource = "write";
-    } else if (state.readCredentials.length) {
-      browseSelect.value = `read:${state.readCredentials[0].id}`;
-      state.browseAccessSource = browseSelect.value;
     } else {
       browseSelect.value = "";
       state.browseAccessSource = "";
@@ -967,7 +966,7 @@ function buildRecentActivities() {
   state.uploads.slice(0, 6).forEach((upload) => {
     const actions = [{ label: "定位", action: "open-browse-path", path: upload.warehouse_target_path, useWriteCredential: true }];
     if (state.selectedKB) {
-      actions.push({ label: "导入", action: "import-path", path: upload.warehouse_target_path, useWriteCredential: true });
+      actions.push({ label: "导入", action: "import-path", path: upload.warehouse_target_path });
     }
     activities.push({
       sortTs: toTimestamp(upload.created_at),
@@ -2448,7 +2447,7 @@ async function refreshUploads() {
           </div>
           <div class="list-actions">
             <button class="ghost" data-action="bind-path" data-path="${upload.warehouse_target_path}" data-scope="file">绑定</button>
-            <button data-action="import-path" data-path="${upload.warehouse_target_path}" data-use-write-credential="true">导入</button>
+            <button data-action="import-path" data-path="${upload.warehouse_target_path}">导入</button>
             <button class="secondary" data-action="open-browse-path" data-path="${upload.warehouse_target_path}" data-use-write-credential="true">定位</button>
           </div>
         </div>
@@ -2464,7 +2463,10 @@ async function createTask(taskType) {
   if (!sourcePath) {
     throw new Error("源路径不能为空");
   }
-  const credentialId = currentBrowseCredentialId() || currentWriteCredentialId();
+  const credentialId = currentBrowseCredentialId();
+  if (!credentialId) {
+    throw new Error("直接创建任务前请先选择读凭证，或先创建带读凭证的绑定后再按绑定源创建任务。");
+  }
   const result = await api(`/kbs/${kbId}/tasks/${taskType}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3391,15 +3393,6 @@ function attachStaticEvents() {
       return;
     }
     if (action === "import-path") {
-      if (target.dataset.useWriteCredential === "true") {
-        const browseSelect = el("warehouse-access-source");
-        if (browseSelect && state.writeCredential) {
-          browseSelect.value = "write";
-        }
-        if (state.writeCredential) {
-          state.browseAccessSource = "write";
-        }
-      }
       withFeedback(() => createImportTask(target.dataset.path), "导入任务已创建")().catch(() => {});
       return;
     }

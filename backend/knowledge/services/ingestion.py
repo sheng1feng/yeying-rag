@@ -475,7 +475,6 @@ class IngestionService:
             path,
             preferred_binding_ids=self._preferred_binding_ids(task),
             explicit_credential_id=self._explicit_credential_id(task),
-            allow_write_fallback=True,
         )
 
     @staticmethod

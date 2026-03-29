@@ -292,6 +292,11 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credenti
 ### `GET /warehouse/uploads`
 
 返回最近上传记录。
+说明：
+
+- `credential_id` 当前只接受读凭证
+- 如果要用写凭证，必须显式传 `use_write_credential=true`
+
 
 ## 4. 绑定源
 
@@ -378,6 +383,8 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credenti
 
 - 不传 `binding_ids` 时默认取全部启用中的绑定源
 - 绑定缺少凭证会直接报错
+- 传入时必须是读凭证
+- 后端会校验该读凭证是否覆盖 `source_paths`
 - `stats_json.created_from = "bindings"`
 
 ### 任务查询与处理
