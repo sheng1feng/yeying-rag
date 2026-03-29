@@ -1,3 +1,5 @@
+// Legacy browser-side helper kept for diagnostics and future experiments.
+// The production bootstrap flow now goes through knowledge backend proxy routes.
 window.KnowledgeWarehouseBridge = (() => {
   class WarehouseBridgeError extends Error {
     constructor(message, options = {}) {

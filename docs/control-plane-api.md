@@ -175,7 +175,7 @@
 说明：
 
 - `partial_success` 当前作为正常 JSON 响应返回，前端应展示告警而不是把它当成纯成功。
-- `cleanup_status` 当前仅表达本地对补偿清理的已知状态，不表示远端已完成真正 revoke/delete。
+- `cleanup_status` 表达当前 attempt 的补偿清理状态。
 
 ### `GET /warehouse/bootstrap/attempts`
 
@@ -215,20 +215,31 @@
 
 用途：
 
-- 对当前钱包下的 bootstrap attempt 记录一次 cleanup 请求
+- 对当前钱包下的 bootstrap attempt 执行 cleanup
+
+输入：
+
+```json
+{
+  "signature": "0x..."
+}
+```
 
 当前行为：
 
-- 当前 `knowledge` 还没有接入上游 `warehouse` 的 revoke/delete API
-- 因此该接口不会真的删除远端 key
-- 它会把 attempt 标记为“需要人工清理”，并记录 cleanup 请求时间
+- 后端会用当前钱包签名换取上游 `warehouse` token
+- 然后调用 `POST /api/v1/public/webdav/access-keys/revoke`
+- 成功后把本地关联凭证标记为 `revoked_local`
+- 如果当前 attempt 不需要清理，则返回当前 attempt 状态，不重复执行 revoke
 
 当前 `cleanup_status` 语义：
 
 - `not_needed`
   - 当前 attempt 不需要补偿清理
 - `manual_cleanup_required`
-  - 当前 attempt 已生成远端 key，但 `knowledge` 侧没有自动清理能力，需要人工去 `warehouse` 处理
+  - 当前 attempt 已生成远端 key，仍需要执行 cleanup
+- `cleanup_completed`
+  - 当前 attempt 关联的远端 key 已通过 `knowledge` 后端代理调用 `warehouse` revoke 接口完成撤销
 
 ### `GET /warehouse/status`
 

@@ -62,8 +62,8 @@
 
 如果当前还没有可用的 `ak/sk`，并且 `warehouse` 中也还没有 `knowledge` 对应的 app 目录，可先在 `knowledge` 控制台里使用：
 
-- “连接 warehouse 初始化 uploads 读写凭证（推荐）”
-- 或“连接 warehouse 初始化 app 根写凭证”
+- “初始化 uploads 读写凭证（推荐）”
+- 或“只初始化 app 根写凭证（高级）”
 
 该流程会在浏览器里临时连接 `warehouse`，自动完成：
 
@@ -78,9 +78,11 @@
 - 临时 `warehouse` token 只保存在当前浏览器 `sessionStorage`
 - 不会落到 `knowledge` 后端数据库
 - 推荐优先使用 `uploads` 模式，它会同时回填一把 uploads 写凭证和一把 uploads 读凭证
-- `app 根写凭证` 模式默认只回填写凭证，后续读凭证仍建议按目录最小权限单独创建
+- `app 根写凭证` 模式只保证 app 根目录的写入口，默认不会补读凭证；后续绑定、浏览现有源目录和导入任务仍建议按目录最小权限单独创建读凭证
 - 当前 bootstrap 响应已经带 `attempt_id`、`status`、`stage`
 - 如果看到 `partial_success`，通常表示写凭证已经回填，但读凭证未完整完成；此时不应把这次初始化当成完全成功
+- 如果看到 `manual_cleanup_required`，说明本次 bootstrap 仍保留远端 access key；当前控制台已经提供撤销入口
+- 如果看到 `cleanup_completed`，说明本次 bootstrap 关联的远端 key 已由 `knowledge` 后端代理调用 `warehouse` revoke 接口撤销，本地关联凭证也会被收口为 `revoked_local`
 
 ### 导入读凭证
 

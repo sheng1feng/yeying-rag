@@ -52,6 +52,8 @@ def test_console_loads_wallet_adapter_before_app():
         assert 'id="connect-wallet"' in response.text
         assert "warehouse_base_url:" in response.text
         assert "warehouse_webdav_prefix:" in response.text
+        assert "初始化 uploads 读写凭证（推荐）" in response.text
+        assert "只初始化 app 根写凭证（高级）" in response.text
         wallet_index = response.text.index(wallet_ref)
         bridge_index = response.text.index(bridge_ref)
         app_index = response.text.index(app_ref)

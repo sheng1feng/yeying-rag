@@ -304,11 +304,11 @@
                 <h2>写凭证 / 上传</h2>
               </div>
               <div class="hint-box">
-                如果当前还没有可用 `ak/sk`，可以先通过一次性 `warehouse` 前台授权，自动创建 Knowledge App 目录并回填凭证。
+                如果当前还没有可用 `ak/sk`，可以先通过一次性 `warehouse` 前台授权，让 knowledge 后端代理创建并回填凭证。
               </div>
               <div class="toolbar">
-                <button id="bootstrap-warehouse-uploads">连接 warehouse 初始化 uploads 读写凭证</button>
-                <button id="bootstrap-warehouse-app-root" class="secondary">连接 warehouse 初始化 app 根写凭证</button>
+                <button id="bootstrap-warehouse-uploads">初始化 uploads 读写凭证（推荐）</button>
+                <button id="bootstrap-warehouse-app-root" class="secondary">只初始化 app 根写凭证（高级）</button>
                 <button id="clear-warehouse-temp-session" class="ghost">清理临时会话</button>
               </div>
               <div id="warehouse-bootstrap-status" class="detail-list empty">尚未连接临时 warehouse 会话。</div>
@@ -324,7 +324,7 @@
                   <button id="delete-write-credential" class="danger">删除写凭证</button>
                 </div>
               </div>
-              <div class="helper">写凭证单独用于当前 Knowledge App 目录的上传/写入，不参与绑定源读取。</div>
+              <div class="helper">写凭证只用于当前 Knowledge App 目录的上传/写入。即使 app 根写凭证初始化成功，后续绑定与导入仍建议单独补读凭证。</div>
               <div class="list" id="write-credential-list"></div>
               <hr />
               <div class="form-grid">

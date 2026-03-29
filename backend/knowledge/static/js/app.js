@@ -105,10 +105,6 @@ function walletHelper() {
   return window.KnowledgeWallet || null;
 }
 
-function warehouseBridgeHelper() {
-  return window.KnowledgeWarehouseBridge || null;
-}
-
 function detectedWalletName() {
   const helper = walletHelper();
   if (!helper?.hasWallet?.()) return "";
@@ -703,7 +699,7 @@ function bootstrapTargetPathForMode(mode) {
 function bootstrapLabels(mode) {
   if (mode === "app_root_write") {
     return {
-      modeLabel: "app 根写凭证",
+      modeLabel: "app 根写凭证（只写）",
       writeName: `knowledge-app-root-write-${Date.now().toString(36)}`,
       writePermissions: ["read", "create", "update"],
       createReadCredential: false,
@@ -721,6 +717,71 @@ function bootstrapLabels(mode) {
     targetPath: currentWarehouseUploadDir(),
     mkcolPath: currentWarehouseUploadDir(),
   };
+}
+
+async function cleanupWarehouseBootstrapAttempt() {
+  const attemptId = Number(state.warehouseBootstrapAttemptId || 0);
+  if (!attemptId) {
+    throw new Error("当前没有可清理的 bootstrap attempt");
+  }
+  if (state.warehouseBootstrapCleanupStatus !== "manual_cleanup_required") {
+    throw new Error("当前 attempt 不需要执行远端清理");
+  }
+  const helper = walletHelper();
+  if (!helper) {
+    throw new Error("钱包适配层未加载");
+  }
+  const confirmed = await confirmAction(
+    "撤销本次 bootstrap 生成的远端密钥",
+    "该操作会请求钱包再次签名，并尝试撤销本次 bootstrap 关联的上游 access key，同时把本地关联凭证标记为 revoked_local。",
+  );
+  if (!confirmed) return;
+
+  const provider = (await helper.discoverProvider?.({ timeoutMs: 1200 })) || helper.getWalletProvider?.();
+  if (!provider) {
+    throw new Error("未检测到钱包，请先安装或解锁夜莺钱包。");
+  }
+  const challenge = await api("/warehouse/bootstrap/challenge", { method: "POST" });
+  const [wallet] = await helper.requestAccounts(provider, { timeoutMs: 15000 });
+  if (!wallet) {
+    throw new Error("未获取到可用钱包账户。");
+  }
+  const normalizedWallet = String(wallet).trim().toLowerCase();
+  const expectedWallet = String(state.wallet || challenge.wallet_address || "").trim().toLowerCase();
+  if (expectedWallet && normalizedWallet !== expectedWallet) {
+    throw new Error(`当前钱包账户 ${wallet} 与 knowledge 登录地址 ${state.wallet} 不一致。请先切回相同钱包地址。`);
+  }
+  setWarehouseBootstrapState("cleanup_signing", "正在请求钱包签名以撤销 bootstrap 生成的远端密钥", {
+    mode: state.warehouseBootstrapMode,
+    targetPath: state.warehouseBootstrapTargetPath,
+    wallet,
+    attemptId,
+    status: state.warehouseBootstrapStatus,
+    cleanupStatus: state.warehouseBootstrapCleanupStatus,
+    warnings: state.warehouseBootstrapWarnings,
+    writeKeyId: state.warehouseBootstrapWriteKeyId,
+    readKeyId: state.warehouseBootstrapReadKeyId,
+  });
+  const signature = await helper.signChallenge(provider, wallet, challenge.challenge, { timeoutMs: 20000 });
+  const result = await api(`/warehouse/bootstrap/attempts/${attemptId}/cleanup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ signature }),
+  });
+  await Promise.all([refreshWarehouseStatus(), refreshWriteCredential(), refreshReadCredentials()]);
+  setWarehouseBootstrapState(result.stage || "cleanup_completed", "bootstrap 关联远端密钥已撤销，本地关联凭证已收口。", {
+    mode: state.warehouseBootstrapMode,
+    targetPath: result.target_path || state.warehouseBootstrapTargetPath,
+    wallet,
+    attemptId: result.id || attemptId,
+    status: result.status || state.warehouseBootstrapStatus,
+    cleanupStatus: result.cleanup_status || "",
+    warnings: result.warnings || [],
+    writeKeyId: result.write_key_id || state.warehouseBootstrapWriteKeyId,
+    readKeyId: result.read_key_id || state.warehouseBootstrapReadKeyId,
+  });
+  notify("success", "bootstrap 关联远端密钥已撤销");
+  return result;
 }
 
 async function bootstrapWarehouseCredentials(mode = "uploads_bundle") {
@@ -1773,7 +1834,7 @@ function renderWarehouseBootstrapStatus() {
   }
   const connected = Boolean(state.warehouseTempWallet);
   const stage = state.warehouseBootstrapMode
-    ? `${state.warehouseBootstrapMode === "uploads_bundle" ? "uploads 读写凭证" : "app 根写凭证"} · ${state.warehouseTempStage || state.warehouseBootstrapMode}`
+    ? `${state.warehouseBootstrapMode === "uploads_bundle" ? "uploads 读写凭证" : "app 根写凭证（只写）"} · ${state.warehouseTempStage || state.warehouseBootstrapMode}`
     : state.warehouseTempStage || (connected ? "authorized" : "idle");
   const tone =
     state.warehouseBootstrapStatus === "failed" || state.warehouseBootstrapError
@@ -1792,6 +1853,15 @@ function renderWarehouseBootstrapStatus() {
     `<div class="detail-list-item"><div class="detail-list-head"><strong>warehouse</strong><span class="pill ${tone}">${escapeHtml(stage)}</span></div><div class="helper">${escapeHtml(state.warehouseBaseUrl)}</div></div>`,
     `<div class="detail-list-item"><div class="detail-list-head"><strong>目标路径</strong><span class="pill">${escapeHtml(targetPath)}</span></div><div class="helper">${escapeHtml(message)}</div></div>`,
   ];
+  const modeHint =
+    state.warehouseBootstrapMode === "app_root_write"
+      ? "app 根写凭证模式只保证当前 app 根目录的写入口。后续绑定、浏览长期源目录和导入任务仍建议显式补读凭证。"
+      : "uploads 读写凭证模式会优先回填一把 uploads 写凭证和一把 uploads 读凭证，适合冷启动。";
+  if (state.warehouseBootstrapMode) {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>模式说明</strong><span class="pill">${escapeHtml(state.warehouseBootstrapMode)}</span></div><div class="helper">${escapeHtml(modeHint)}</div></div>`,
+    );
+  }
   if (state.warehouseBootstrapAttemptId) {
     details.push(
       `<div class="detail-list-item"><div class="detail-list-head"><strong>最近一次尝试</strong><span class="pill ${tone}">${escapeHtml(state.warehouseBootstrapStatus || "-")}</span></div><div class="helper">attempt_id=${escapeHtml(String(state.warehouseBootstrapAttemptId))} · cleanup=${escapeHtml(state.warehouseBootstrapCleanupStatus || "-")}</div></div>`,
@@ -1810,6 +1880,11 @@ function renderWarehouseBootstrapStatus() {
   if (state.warehouseBootstrapWarnings.length) {
     details.push(
       `<div class="detail-list-item"><div class="detail-list-head"><strong>注意事项</strong><span class="pill warning">${escapeHtml(String(state.warehouseBootstrapWarnings.length))}</span></div><div class="helper">${escapeHtml(state.warehouseBootstrapWarnings.join(" "))}</div></div>`,
+    );
+  }
+  if (state.warehouseBootstrapAttemptId && state.warehouseBootstrapCleanupStatus === "manual_cleanup_required") {
+    details.push(
+      `<div class="detail-list-item"><div class="detail-list-head"><strong>补偿清理</strong><span class="pill warning">${escapeHtml(state.warehouseBootstrapCleanupStatus)}</span></div><div class="helper">本次 bootstrap 仍保留远端 access key。建议立即撤销，避免重复重试继续堆积无用密钥。</div><div class="list-actions"><button data-action="cleanup-bootstrap-attempt" class="danger">撤销本次 bootstrap 生成的远端密钥</button></div></div>`,
     );
   }
   box.className = "detail-list";
@@ -3444,6 +3519,13 @@ function attachStaticEvents() {
     }
     if (action === "jump-view") {
       setView(target.dataset.view || "dashboard");
+      return;
+    }
+    if (action === "cleanup-bootstrap-attempt") {
+      cleanupWarehouseBootstrapAttempt().catch((err) => {
+        notify("error", err.message);
+        setOutput(err.message);
+      });
       return;
     }
   });

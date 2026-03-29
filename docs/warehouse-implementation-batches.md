@@ -47,7 +47,10 @@
 
 - 目标
   - bootstrap attempt 查询接口
-  - bootstrap attempt cleanup 请求接口
+  - bootstrap attempt cleanup 接口
+  - 远端 cleanup 闭环
+  - 通过上游 `warehouse` revoke API 撤销本次 bootstrap 生成的远端 key
+  - 把本地关联凭证标记为 `revoked_local`
   - bootstrap key 名称前缀、过期策略与本地复用开关配置化
 - 主要修改文件
   - `backend/knowledge/core/settings.py`
@@ -67,13 +70,22 @@
 #### 批次 3
 
 - 目标
-  - cleanup revoke 测试桩补齐
-  - cleanup 流程回归覆盖修正
+  - 前端/产品收口
+  - cleanup 前端入口
+  - `app_root_write` 模式文案收口
+- 状态
+  - 已完成开发、测试通过、待提交
 - 主要修改文件
+  - `backend/knowledge/templates/index.html`
+  - `backend/knowledge/static/js/app.js`
+  - `backend/knowledge/static/js/warehouse_bridge.js`
+  - `docs/warehouse-credential-usage.md`
+  - `docs/warehouse-auth-refactor.md`
+  - `docs/control-plane-api.md`
   - `tests/test_app.py`
   - `docs/warehouse-implementation-batches.md`
 - 对应提交
-  - `test(warehouse): cover cleanup revoke flow`
+  - `fix(console): tighten bootstrap product flow`
 - 已执行测试
   - `python3 -m pytest tests/test_app.py`
-  - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall tests/test_app.py`
+  - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall backend/knowledge tests/test_app.py`
