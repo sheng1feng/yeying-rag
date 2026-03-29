@@ -246,6 +246,26 @@ class WarehouseAccessService:
             .order_by(WarehouseAccessCredential.updated_at.desc(), WarehouseAccessCredential.id.desc())
         )
 
+    def revoke_read_credential_local(self, db: Session, wallet_address: str, credential_id: int) -> WarehouseAccessCredential:
+        credential = db.get(WarehouseAccessCredential, int(credential_id))
+        if credential is None or credential.owner_wallet_address != wallet_address.lower():
+            raise ValueError("warehouse credential not found")
+        if credential.credential_kind != READ_CREDENTIAL_KIND:
+            raise ValueError(f"warehouse credential must be {READ_CREDENTIAL_KIND}")
+        credential.status = REVOKED_LOCAL_CREDENTIAL_STATUS
+        db.commit()
+        db.refresh(credential)
+        return credential
+
+    def revoke_write_credential_local(self, db: Session, wallet_address: str) -> WarehouseAccessCredential:
+        credential = self.get_write_credential(db, wallet_address)
+        if credential is None:
+            raise ValueError("warehouse write credential not configured")
+        credential.status = REVOKED_LOCAL_CREDENTIAL_STATUS
+        db.commit()
+        db.refresh(credential)
+        return credential
+
     def find_best_read_credential_for_path(
         self,
         db: Session,
@@ -334,6 +354,8 @@ class WarehouseAccessService:
         credential = self.get_write_credential(db, wallet_address)
         if credential is None:
             raise ValueError("warehouse write credential not configured")
+        if credential.status == REVOKED_LOCAL_CREDENTIAL_STATUS:
+            raise ValueError("warehouse write credential revoked locally")
         normalized_path = ensure_current_app_path(path, "path", self.settings)
         if not self.credential_covers_path(credential, normalized_path):
             raise ValueError(f"path exceeds write credential scope: {normalized_path}")

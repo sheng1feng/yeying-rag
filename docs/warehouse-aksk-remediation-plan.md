@@ -1,6 +1,8 @@
-# Warehouse `ak/sk` 创建改造计划
+# Warehouse `ak/sk` 创建改造计划与执行状态
 
 本文档是在 `docs/warehouse-aksk-creation-review.md` 的问题分析基础上，给出一版可执行的改造计划。
+
+截至当前代码状态，这份计划里的主体工程已经不是“待开始”，而是“多数已落地，少数收口项待继续”。
 
 范围只覆盖真实 `bound_token` 场景下的：
 
@@ -15,6 +17,26 @@
 - `mock` 模式
 - Source / Asset / Ingestion 的全量重构
 - 更广义的 `warehouse` 访问收口
+
+## 0. 当前执行状态
+
+已经完成的核心项：
+
+- provisioning attempt 持久化
+- bootstrap 结构化状态、`partial_success`、`cleanup_status`
+- 本地 bootstrap 凭证元数据与本地复用
+- bootstrap attempt 查询接口
+- cleanup 闭环接上游 `revoke`
+- TTL / key name prefix / reuse 开关配置化
+- 前端 bootstrap 与 cleanup 收口
+- 读路径移除写凭证回退
+- 通用本地 `revoke-local` 管理动作
+
+当前仍待继续的项：
+
+- 将整篇文档从“计划口吻”进一步回写为“现状口吻”
+- 评估 `SourceBinding` 根路径快照是否值得补模型
+- 决定是否彻底移除 `warehouse_bridge.js`
 
 ## 1. 目标
 
@@ -689,4 +711,3 @@
   - 等代码落地后，记录最终设计事实
 - `docs/warehouse-credential-usage.md`
   - 面向用户与运营，记录最终操作手册
-

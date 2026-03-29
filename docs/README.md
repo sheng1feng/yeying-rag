@@ -24,6 +24,10 @@
   - 面向工程落地的正式改造计划，包含问题分级、代码改动点、测试计划和阶段划分。
 - `docs/warehouse-implementation-batches.md`
   - 记录分批开发、测试和后续补提交所需的信息。
+- `docs/warehouse-current-status-summary.md`
+  - 汇总当前 `warehouse` 改造的真实完成度、未完成项、待提交批次与建议下一步。
+- `docs/warehouse-migration-guide.md`
+  - 说明从旧钱包绑定 / 旧本地数据迁移到当前凭证模型的建议步骤。
 - `docs/api-integration.md`
   - 面向外部服务接入。
   - `service search`、`grant`、`release` 相关内容仍有参考价值。
@@ -49,12 +53,13 @@
 - `warehouse` `ak/sk` 创建流程评审
 - `warehouse` `ak/sk` 改造计划
 - `warehouse` 改造批次记录
+- `warehouse` 当前状态总览
+- `warehouse` 迁移说明
 - `warehouse` 收口 TODO
 - 控制面 API 文档
 
 ## 仍可继续补充的文档
 
-- `warehouse` 迁移说明
 - 领域模型说明
 - task / worker 失败语义专项文档
 

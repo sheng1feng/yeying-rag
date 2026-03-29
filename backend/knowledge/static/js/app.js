@@ -1786,10 +1786,15 @@ function renderReadCredentials() {
             <span class="pill ${credential.status === "active" ? "success" : "warning"}">${escapeHtml(credential.status)}</span>
           </div>
           <div class="list-subtitle">${escapeHtml(credential.root_path)}</div>
-          <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}</div>
+          <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}${credential.status === "revoked_local" ? " · 已在本地显式禁用" : ""}</div>
           <div class="list-actions">
             <button class="ghost" data-action="reveal-read-credential" data-credential-id="${credential.id}">${revealed ? "重新显示" : "显示 sk"}</button>
-            <button class="secondary" data-action="use-read-credential" data-credential-id="${credential.id}">设为浏览/绑定</button>
+            ${
+              credential.status === "active"
+                ? `<button class="secondary" data-action="use-read-credential" data-credential-id="${credential.id}">设为浏览/绑定</button>
+            <button class="secondary" data-action="revoke-read-credential" data-credential-id="${credential.id}">本地吊销</button>`
+                : ""
+            }
             <button class="danger" data-action="delete-read-credential" data-credential-id="${credential.id}">删除</button>
           </div>
         </div>
@@ -1814,10 +1819,11 @@ function renderWriteCredential() {
         <span class="pill ${credential.status === "active" ? "success" : "warning"}">${escapeHtml(credential.status)}</span>
       </div>
       <div class="list-subtitle">${escapeHtml(credential.root_path)}</div>
-      <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}</div>
+      <div class="helper">sk=${escapeHtml(revealed || credential.key_secret_masked)} · 最近校验 ${formatDate(credential.last_verified_at)} · 最近使用 ${formatDate(credential.last_used_at)}${credential.status === "revoked_local" ? " · 已在本地显式禁用" : ""}</div>
       <div class="list-actions">
         <button class="ghost" data-action="reveal-write-credential">${revealed ? "重新显示" : "显示 sk"}</button>
-        <button class="secondary" data-action="use-write-credential">设为浏览凭证</button>
+        ${credential.status === "active" ? `<button class="secondary" data-action="use-write-credential">设为浏览凭证</button>` : ""}
+        ${credential.status === "active" ? `<button class="secondary" data-action="revoke-write-credential">本地吊销</button>` : ""}
       </div>
     </div>
   `;
@@ -1918,6 +1924,15 @@ async function deleteReadCredential(credentialId) {
   setOutput({ ok: true, deleted_credential_id: credentialId });
 }
 
+async function revokeReadCredentialLocal(credentialId) {
+  const confirmed = await confirmAction("本地吊销读凭证", "吊销后，该凭证会保留在本地列表里，但 browse / binding / task 读链路都会拒绝继续使用它。");
+  if (!confirmed) return;
+  const result = await api(`/warehouse/credentials/read/${credentialId}/revoke-local`, { method: "POST" });
+  delete state.revealedCredentialSecrets[credentialId];
+  await Promise.all([refreshWarehouseStatus(), refreshReadCredentials()]);
+  setOutput(result);
+}
+
 async function revealReadCredential(credentialId) {
   const result = await api(`/warehouse/credentials/read/${credentialId}/secret`);
   state.revealedCredentialSecrets[credentialId] = result.key_secret;
@@ -1953,6 +1968,18 @@ async function deleteWriteCredential() {
   }
   await Promise.all([refreshWarehouseStatus(), refreshWriteCredential()]);
   setOutput({ ok: true });
+}
+
+async function revokeWriteCredentialLocal() {
+  const confirmed = await confirmAction("本地吊销写凭证", "吊销后，该写凭证会保留在本地列表里，但上传、bootstrap 后续写入和显式写浏览都会拒绝继续使用它。");
+  if (!confirmed) return;
+  const credentialId = currentWriteCredentialId();
+  const result = await api("/warehouse/credentials/write/revoke-local", { method: "POST" });
+  if (credentialId) {
+    delete state.revealedCredentialSecrets[credentialId];
+  }
+  await Promise.all([refreshWarehouseStatus(), refreshWriteCredential(), refreshReadCredentials()]);
+  setOutput(result);
 }
 
 async function revealWriteCredential() {
@@ -3357,6 +3384,10 @@ function attachStaticEvents() {
       withFeedback(() => deleteReadCredential(Number(target.dataset.credentialId)), "读凭证已删除")().catch(() => {});
       return;
     }
+    if (action === "revoke-read-credential") {
+      withFeedback(() => revokeReadCredentialLocal(Number(target.dataset.credentialId)), "读凭证已本地吊销")().catch(() => {});
+      return;
+    }
     if (action === "use-read-credential") {
       const credentialId = Number(target.dataset.credentialId || 0);
       if (credentialId > 0) {
@@ -3371,6 +3402,10 @@ function attachStaticEvents() {
     }
     if (action === "reveal-write-credential") {
       withFeedback(revealWriteCredential)().catch(() => {});
+      return;
+    }
+    if (action === "revoke-write-credential") {
+      withFeedback(revokeWriteCredentialLocal, "写凭证已本地吊销")().catch(() => {});
       return;
     }
     if (action === "use-write-credential") {

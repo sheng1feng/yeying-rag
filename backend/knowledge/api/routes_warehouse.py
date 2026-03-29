@@ -94,11 +94,13 @@ def _warehouse_error_detail(exc: Exception, path: str | None = None) -> str:
 def _current_app_binding_status(db: Session, wallet_address: str) -> WarehouseStatusResponse:
     read_credentials = warehouse_access_service.list_read_credentials(db, wallet_address)
     write_credential = warehouse_access_service.get_write_credential(db, wallet_address)
-    credentials_ready = bool(read_credentials or write_credential is not None)
+    active_read_credentials = [credential for credential in read_credentials if credential.status == "active"]
+    active_write_credential = write_credential if write_credential is not None and write_credential.status == "active" else None
+    credentials_ready = bool(active_read_credentials or active_write_credential is not None)
     return WarehouseStatusResponse(
         wallet_address=wallet_address,
         credentials_ready=credentials_ready,
-        read_credentials_count=len(read_credentials),
+        read_credentials_count=len(active_read_credentials),
         write_credential_id=write_credential.id if write_credential is not None else None,
         write_credential_status=write_credential.status if write_credential is not None else None,
         write_root_path=write_credential.root_path if write_credential is not None else None,
@@ -282,6 +284,19 @@ def delete_read_credential(
     return {"ok": True}
 
 
+@router.post("/warehouse/credentials/read/{credential_id}/revoke-local", response_model=WarehouseCredentialSummary)
+def revoke_read_credential_local(
+    credential_id: int,
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> WarehouseCredentialSummary:
+    try:
+        credential = warehouse_access_service.revoke_read_credential_local(db, wallet_address, credential_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WarehouseCredentialSummary.model_validate(warehouse_access_service.summarize(credential))
+
+
 @router.get("/warehouse/credentials/write", response_model=WarehouseWriteCredentialResponse)
 def get_write_credential(wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> WarehouseWriteCredentialResponse:
     return _write_credential_response(db, wallet_address)
@@ -328,6 +343,18 @@ def reveal_write_credential_secret(wallet_address: str = Depends(get_current_wal
 def delete_write_credential(wallet_address: str = Depends(get_current_wallet), db: Session = Depends(get_db)) -> dict:
     warehouse_access_service.delete_write_credential(db, wallet_address)
     return {"ok": True}
+
+
+@router.post("/warehouse/credentials/write/revoke-local", response_model=WarehouseCredentialSummary)
+def revoke_write_credential_local(
+    wallet_address: str = Depends(get_current_wallet),
+    db: Session = Depends(get_db),
+) -> WarehouseCredentialSummary:
+    try:
+        credential = warehouse_access_service.revoke_write_credential_local(db, wallet_address)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return WarehouseCredentialSummary.model_validate(warehouse_access_service.summarize(credential))
 
 
 @router.get("/warehouse/browse", response_model=WarehouseBrowseResponse)

@@ -79,11 +79,13 @@
   - `backend/knowledge/templates/index.html`
   - `backend/knowledge/static/js/app.js`
   - `backend/knowledge/static/js/warehouse_bridge.js`
+  - `docs/README.md`
+  - `docs/warehouse-current-status-summary.md`
   - `docs/warehouse-credential-usage.md`
   - `docs/warehouse-auth-refactor.md`
   - `docs/control-plane-api.md`
-  - `tests/test_app.py`
   - `docs/warehouse-implementation-batches.md`
+  - `tests/test_app.py`
 - 对应提交
   - `fix(console): tighten bootstrap product flow`
 - 已执行测试
@@ -111,3 +113,32 @@
   - `fix(warehouse): remove write fallback from read paths`
 - 已执行测试
   - `python3 -m pytest tests/test_app.py`
+  - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall backend/knowledge tests/test_app.py`
+
+#### 批次 5
+
+- 目标
+  - 增加通用本地 `revoke-local` 控制面动作
+  - 让 `revoked_local` 的凭证在 browse / upload / task 上被本地拒绝
+  - 回写当前状态文档和迁移说明
+- 状态
+  - 已完成开发、测试通过、待提交
+- 主要修改文件
+  - `backend/knowledge/api/routes_warehouse.py`
+  - `backend/knowledge/services/warehouse_access.py`
+  - `backend/knowledge/static/js/app.js`
+  - `docs/README.md`
+  - `docs/control-plane-api.md`
+  - `docs/todo-warehouse-auth-refactor.md`
+  - `docs/warehouse-aksk-remediation-plan.md`
+  - `docs/warehouse-auth-refactor.md`
+  - `docs/warehouse-credential-usage.md`
+  - `docs/warehouse-current-status-summary.md`
+  - `docs/warehouse-migration-guide.md`
+  - `docs/warehouse-implementation-batches.md`
+  - `tests/test_app.py`
+- 对应提交
+  - `feat(warehouse): add local credential revoke controls`
+- 已执行测试
+  - `python3 -m pytest tests/test_app.py`
+  - `PYTHONPYCACHEPREFIX=/tmp/knowledge_pycache python3 -m compileall backend/knowledge tests/test_app.py`

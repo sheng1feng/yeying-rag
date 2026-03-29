@@ -233,6 +233,16 @@
 - `invalid`
 - `revoked_local`
 
+当前控制面已提供：
+
+- `POST /warehouse/credentials/read/{credential_id}/revoke-local`
+- `POST /warehouse/credentials/write/revoke-local`
+
+语义：
+
+- `revoke-local` 保留本地记录，但显式拒绝后续继续使用
+- 适合先止血、再排查 binding / task / source scan 的引用关系
+
 运行期如果遇到 `401/403`：
 
 - 当前访问凭证会被标记为 `invalid`

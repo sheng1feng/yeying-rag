@@ -78,6 +78,15 @@
 
 - 如果仍被 `SourceBinding` 引用，会返回冲突
 
+#### `POST /warehouse/credentials/read/{credential_id}/revoke-local`
+
+把指定读凭证标记为 `revoked_local`。
+
+行为：
+
+- 保留本地记录
+- 后续 browse / preview / binding / task 读链路会拒绝继续使用它
+
 ### 2.2 写凭证
 
 #### `GET /warehouse/credentials/write`
@@ -114,6 +123,15 @@
 #### `DELETE /warehouse/credentials/write`
 
 删除当前写凭证。
+
+#### `POST /warehouse/credentials/write/revoke-local`
+
+把当前写凭证标记为 `revoked_local`。
+
+行为：
+
+- 保留本地记录
+- 后续 upload / 显式写浏览会拒绝继续使用它
 
 ## 3. Warehouse 浏览与上传
 
@@ -249,6 +267,7 @@
 
 - `credentials_ready`
 - `read_credentials_count`
+  - 当前表示 active 读凭证数量
 - `write_credential_id`
 - `write_credential_status`
 - `current_app_root`
@@ -273,6 +292,11 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&credential_id=2
 GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credential=true
 ```
 
+说明：
+
+- `credential_id` 当前只接受读凭证
+- 如果要用写凭证，必须显式传 `use_write_credential=true`
+
 ### `GET /warehouse/preview`
 
 参数与浏览一致，但只支持文件。
@@ -292,11 +316,6 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credenti
 ### `GET /warehouse/uploads`
 
 返回最近上传记录。
-说明：
-
-- `credential_id` 当前只接受读凭证
-- 如果要用写凭证，必须显式传 `use_write_credential=true`
-
 
 ## 4. 绑定源
 
@@ -364,6 +383,8 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credenti
 
 - `credential_id` 可选
 - 传入时会记录到 `stats_json.explicit_credential_id`
+- 传入时必须是读凭证
+- 后端会校验该读凭证是否覆盖 `source_paths`
 
 ### 按绑定源创建任务
 
@@ -383,8 +404,6 @@ GET /warehouse/browse?path=/apps/knowledge.yeying.pub/uploads&use_write_credenti
 
 - 不传 `binding_ids` 时默认取全部启用中的绑定源
 - 绑定缺少凭证会直接报错
-- 传入时必须是读凭证
-- 后端会校验该读凭证是否覆盖 `source_paths`
 - `stats_json.created_from = "bindings"`
 
 ### 任务查询与处理

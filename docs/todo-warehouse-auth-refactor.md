@@ -6,35 +6,40 @@
 
 - `docs/warehouse-aksk-remediation-plan.md`
 
-## 后端模型
+## 已完成
 
-- 确认 `WarehouseAccessCredential` 字段已满足当前文档口径
-- 评估是否需要为 `SourceBinding` 增加绑定时确认过的根路径快照
-- 评估是否需要补充本地 revoke 的显式管理动作
+- `WarehouseAccessCredential` 已补足 bootstrap 来源、上游 key 映射、provisioning 元数据
+- 已新增 provisioning attempt 记录与 cleanup 状态
+- 已补充本地 `revoke-local` 显式管理动作
+- browse / preview 的显式 `credential_id` 已限定为读凭证
+- source scan / task / evidence 已移除写凭证读回退
 
-## API
+## 仍待确认
+
+- 是否需要为 `SourceBinding` 增加绑定时确认过的根路径快照
+- 是否要给本地 revoke 增加恢复动作，而不是只保留 `revoke-local`
+- 是否要彻底移除 `warehouse_bridge.js`
+
+## API 与状态文档
 
 - 持续维护 `docs/control-plane-api.md`，避免控制台接口散落在各文档里
 - 保持 `/warehouse/status` 作为当前唯一状态查询接口
-
-## 网关访问层
-
-- 继续保证所有 `warehouse` 路径都先经过当前 app 边界校验
-- 保持 Basic Auth 作为主访问方式
-- 复核只读场景不会意外触发写请求
-- 评估是否要移除浏览接口里的写凭证隐式兜底
+- 当前 `/warehouse/status.read_credentials_count` 已按 active 读凭证计数
 
 ## 绑定与任务
 
 - 继续保证 binding 与 `credential_id` 的显式关系不丢失
-- 复核手工任务、绑定任务、evidence 构建都优先按 binding 或显式 `credential_id` 取读凭证
-- 评估是否要移除内部 `allow_write_fallback`，彻底收口到只读凭证
+- 当前手工任务里显式 `credential_id` 已限定为读凭证
+- 当前内部读链路已不再回退到写凭证
 
 ## 前端 UI
 
 - 保持“先导入读/写凭证，再浏览/上传/绑定”的主叙事
 - 明确旧钱包绑定状态只作为兼容信息，不作为主入口
-- 统一提示文案：
+- 当前控制台已提供：
+  - bootstrap cleanup 入口
+  - 读凭证 / 写凭证的 `revoke-local` 入口
+- 继续统一提示文案：
   - 未配置写凭证
   - 绑定缺少读凭证
   - 凭证失效
@@ -42,7 +47,7 @@
 
 ## 迁移与清理
 
-- 明确旧 UCAN/JWT 用户的离线迁移说明
+- 旧 UCAN/JWT 用户的迁移说明已补到 `docs/warehouse-migration-guide.md`
 - 清理本地旧数据库中的历史绑定表数据时，优先采用手工删库重建或显式脚本
 
 ## 测试项

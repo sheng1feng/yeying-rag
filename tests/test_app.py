@@ -363,6 +363,68 @@ def test_import_processing_no_longer_falls_back_to_write_credential():
         assert "warehouse credential not found for path" in task_detail.json()["error_message"]
 
 
+def test_revoke_read_credential_local_blocks_read_access():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+        credentials = configure_warehouse_credentials(client, headers)
+
+        revoked = client.post(
+            f"/warehouse/credentials/read/{credentials['read_credential_id']}/revoke-local",
+            headers=headers,
+        )
+        assert revoked.status_code == 200
+        assert revoked.json()["status"] == "revoked_local"
+
+        reads = client.get("/warehouse/credentials/read", headers=headers)
+        assert reads.status_code == 200
+        assert any(item["id"] == credentials["read_credential_id"] and item["status"] == "revoked_local" for item in reads.json())
+
+        browse = client.get(
+            f"/warehouse/browse?path={APP_ROOT}&credential_id={credentials['read_credential_id']}",
+            headers=headers,
+        )
+        assert browse.status_code == 400
+        assert "warehouse credential revoked locally" in browse.json()["detail"]
+
+
+def test_revoke_write_credential_local_blocks_upload_and_status_ready():
+    account = Account.create()
+    with TestClient(app) as client:
+        token = _login(client, account)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        write_response = client.post(
+            "/warehouse/credentials/write",
+            headers=headers,
+            json={
+                "key_id": "ak_test_write_local_revoke",
+                "key_secret": "sk_test_write_local_revoke",
+                "root_path": APP_ROOT,
+            },
+        )
+        assert write_response.status_code == 200
+
+        revoked = client.post("/warehouse/credentials/write/revoke-local", headers=headers)
+        assert revoked.status_code == 200
+        assert revoked.json()["status"] == "revoked_local"
+
+        status_response = client.get("/warehouse/status", headers=headers)
+        assert status_response.status_code == 200
+        assert status_response.json()["credentials_ready"] is False
+        assert status_response.json()["write_credential_status"] == "revoked_local"
+
+        upload = client.post(
+            "/warehouse/upload",
+            headers=headers,
+            data={"target_dir": UPLOADS_ROOT},
+            files={"file": ("blocked.txt", b"revoked write", "text/plain")},
+        )
+        assert upload.status_code == 400
+        assert "warehouse write credential revoked locally" in upload.json()["detail"]
+
+
 def test_upload_succeeds_with_write_credential_scoped_to_uploads_subtree():
     account = Account.create()
     with TestClient(app) as client:
